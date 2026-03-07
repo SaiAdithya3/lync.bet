@@ -12,10 +12,7 @@ contract OutcomeToken is ERC20 {
         _;
     }
 
-    constructor(
-        string memory name,
-        string memory symbol
-    ) ERC20(name, symbol) {
+    constructor(string memory name, string memory symbol) ERC20(name, symbol) {
         factory = msg.sender; // whoever deploys this IS the factory
     }
 
