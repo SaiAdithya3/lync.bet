@@ -17,10 +17,8 @@ contract DeployScript is Script {
         console.log("MockUSDC deployed:", address(usdc));
 
         // 2. Deploy PredictionMarket
-        PredictionMarket market = new PredictionMarket(
-            address(usdc),
-            forwarder
-        );
+        address owner = vm.addr(deployerPrivateKey);
+        PredictionMarket market = new PredictionMarket(address(usdc), forwarder, owner);
         console.log("PredictionMarket deployed:", address(market));
 
         vm.stopBroadcast();

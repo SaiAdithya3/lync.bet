@@ -13,10 +13,7 @@ contract CreateMarketScript is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        uint256 marketId = market.createMarket(
-            keccak256("Will BTC hit 100k by Dec 2025?"),
-            block.timestamp + 30 days
-        );
+        uint256 marketId = market.createMarket(keccak256("Will BTC hit 100k by Dec 2025?"), block.timestamp + 30 days);
 
         console.log("Market created with ID:", marketId);
 
