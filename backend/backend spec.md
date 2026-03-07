@@ -2,11 +2,19 @@
 
 ## Overview
 
-The backend serves as the middleware between the frontend, smart contracts, and CRE workflow. It handles three core responsibilities:
+The backend serves as the middleware between the frontend, smart contracts, and CRE workflow. It handles four core responsibilities:
 
-1. **Quest Management** — create markets with AI-powered deduplication
-2. **Order Matching** — off-chain orderbook that settles trades on-chain
+1. **Quest Management** — create markets with AI-powered deduplication (owner only)
+2. **Order Execution** — users sign EIP-712 orders; backend submits `fillOrder` / `batchFillOrders` on-chain
 3. **Data Serving** — market data, prices, portfolios, and activity feeds
+4. **Watcher Service** — separate process that listens to chain events and keeps the DB in sync
+
+### Contract Model (PredictionMarket.sol)
+
+- **Owner-only:** `createMarket`, `fillOrder`, `batchFillOrders`, `cancelMarket`
+- **Signature-based fills:** Users sign orders (marketId, outcome, to, shares, cost, deadline, nonce); backend pulls USDC and mints tokens
+- **1:1 redemption:** 1 winning share = 1 USDC; backend sets prices so liquidity is sufficient
+- **Events:** `MarketCreated`, `OrderFilled`, `MarketResolved`, `MarketCancelled`, `WinningsRedeemed`
 
 ---
 
@@ -56,40 +64,42 @@ CREATE INDEX idx_markets_embedding ON markets
 CREATE INDEX idx_markets_status ON markets(status);
 CREATE INDEX idx_markets_category ON markets(category);
 
--- Orders (the off-chain orderbook)
+-- Orders (signed orders awaiting on-chain fill)
 CREATE TABLE orders (
     id              SERIAL PRIMARY KEY,
     market_id       INTEGER NOT NULL REFERENCES markets(market_id),
     user_address    VARCHAR(42) NOT NULL,
-    side            VARCHAR(4) NOT NULL,                -- 'buy' or 'sell'
     token           VARCHAR(3) NOT NULL,                -- 'YES' or 'NO'
-    amount          BIGINT NOT NULL,                    -- in token units (6 decimals)
-    price           INTEGER NOT NULL,                   -- in cents (1-99)
-    filled_amount   BIGINT NOT NULL DEFAULT 0,
-    status          VARCHAR(10) NOT NULL DEFAULT 'open', -- open, filled, partial, cancelled
+    shares          BIGINT NOT NULL,                    -- tokens to mint (6 decimals)
+    cost            BIGINT NOT NULL,                    -- USDC to pull (6 decimals)
+    price           INTEGER NOT NULL,                   -- cents (1-99), for display
+    nonce           BIGINT NOT NULL,
+    signature       BYTEA NOT NULL,                     -- EIP-712 sig (65 bytes)
+    status          VARCHAR(15) NOT NULL DEFAULT 'pending', -- pending, filled, expired, cancelled
+    tx_hash         VARCHAR(66),                        -- fill tx hash (set by watcher)
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     filled_at       TIMESTAMPTZ
 );
 
 CREATE INDEX idx_orders_market ON orders(market_id, status);
-CREATE INDEX idx_orders_matching ON orders(market_id, token, side, price, status);
+CREATE INDEX idx_orders_user ON orders(user_address, status);
 
--- Trades (matched order pairs)
+-- Trades (from OrderFilled events; watcher populates)
 CREATE TABLE trades (
     id              SERIAL PRIMARY KEY,
     market_id       INTEGER NOT NULL REFERENCES markets(market_id),
-    buy_order_id    INTEGER REFERENCES orders(id),
-    sell_order_id   INTEGER REFERENCES orders(id),
     buyer_address   VARCHAR(42) NOT NULL,
-    seller_address  VARCHAR(42) NOT NULL,
     token           VARCHAR(3) NOT NULL,                -- YES or NO
-    amount          BIGINT NOT NULL,
-    price           INTEGER NOT NULL,                   -- cents
-    tx_hash         VARCHAR(66),                        -- on-chain settlement tx
+    shares          BIGINT NOT NULL,
+    cost            BIGINT NOT NULL,                   -- USDC paid
+    tx_hash         VARCHAR(66) NOT NULL,
+    block_number    BIGINT,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX idx_trades_market ON trades(market_id);
+CREATE INDEX idx_trades_buyer ON trades(buyer_address);
+CREATE INDEX idx_trades_tx ON trades(tx_hash);
 
 -- Price history (for charts)
 CREATE TABLE price_snapshots (
@@ -101,6 +111,15 @@ CREATE TABLE price_snapshots (
 );
 
 CREATE INDEX idx_price_snapshots_market ON price_snapshots(market_id, timestamp);
+
+-- Watcher sync state (tracks last processed block per chain)
+CREATE TABLE watcher_cursor (
+    id              SERIAL PRIMARY KEY,
+    chain_id        INTEGER NOT NULL UNIQUE,
+    contract_address VARCHAR(42) NOT NULL,
+    last_block      BIGINT NOT NULL DEFAULT 0,
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
 ```
 
 ---
@@ -252,99 +271,135 @@ Response:
 
 ---
 
-### Trading (Orderbook)
+### Trading (Signed Orders → On-Chain Fill)
 
-#### `POST /api/orders`
+The contract uses **signature-based order execution**: users sign EIP-712 orders off-chain; the backend (owner) submits `fillOrder` or `batchFillOrders` on-chain. Users only need a one-time USDC approval.
 
-Place a new order.
+#### Contract Flow Summary
+
+```
+1. Backend quotes price (e.g. YES at 72¢)
+2. User signs Order: { marketId, outcome, to, shares, cost, deadline, nonce }
+   - shares = floor(cost / (price/100))  e.g. $5 at 72¢ → 6,944,444 shares
+   - cost = USDC amount user pays (6 decimals)
+3. User approves PredictionMarket for USDC (one-time)
+4. Backend calls fillOrder(order, signature) or batchFillOrders(orders, signatures)
+5. Contract pulls USDC, mints YES/NO tokens to user
+```
+
+#### `POST /api/orders/quote`
+
+Get a signed order payload for the frontend to sign (no DB write yet).
 
 ```
 Request:
 {
     "marketId": 0,
-    "side": "buy",
     "token": "YES",
-    "amount": 1000000,       // 1 USDC worth of tokens
-    "price": 72,             // willing to pay 72 cents per YES token
-    "userAddress": "0x742d..."
+    "cost": 5000000,          // $5 USDC (6 decimals)
+    "userAddress": "0x742d...",
+    "recipientAddress": "0x742d..."  // optional, defaults to userAddress
+}
+
+Response:
+{
+    "order": {
+        "marketId": 0,
+        "outcome": 1,             // 1 = Yes, 2 = No
+        "to": "0x742d...",
+        "shares": 6944444,        // floor(cost / (price/100)) × 1e6
+        "cost": 5000000,
+        "deadline": 1734567890,
+        "nonce": 0                // from contract.nonces(userAddress)
+    },
+    "orderDigest": "0x...",       // from contract.orderDigest(order)
+    "signingPayload": { ... }     // EIP-712 typed data for signTypedData_v4
+}
+```
+
+**Backend:** Fetch `nonce` from `contract.nonces(userAddress)`, compute `shares` from `cost` and current `price`, set `deadline` (e.g. +1 hour).
+
+#### `POST /api/orders`
+
+Submit a signed order. Backend stores it and either fills immediately or queues for batch.
+
+```
+Request:
+{
+    "marketId": 0,
+    "token": "YES",
+    "shares": 6944444,
+    "cost": 5000000,
+    "price": 72,
+    "nonce": 0,
+    "deadline": 1734567890,
+    "signature": "0x...",         // 65 bytes: r (32) + s (32) + v (1)
+    "userAddress": "0x742d...",
+    "recipientAddress": "0x742d..."
 }
 
 Response:
 {
     "orderId": 15,
-    "status": "filled",       // or "open" if no match
-    "filledAmount": 1000000,
-    "trade": {                 // only if matched
-        "tradeId": 8,
-        "counterparty": "0x3f2...",
-        "price": 72,
-        "txHash": "0x..."     // on-chain settlement
-    }
+    "status": "filled",           // or "pending" if queued
+    "txHash": "0x...",            // if filled immediately
+    "shares": 6944444,
+    "cost": 5000000
 }
 ```
 
-**Matching logic:**
+**Backend logic:**
 ```
-New buy order for YES at 72¢ comes in:
+1. Reconstruct Order struct, verify signature matches orderDigest
+2. Check user has enough USDC allowance for cost
+3. Check market is open, order not expired
+4. Option A: fillOrder immediately (single order)
+5. Option B: add to batch queue, run batchFillOrders periodically
+6. Store order in DB with status pending/filled
+7. Watcher will update tx_hash and filled_at when OrderFilled is seen
+```
 
-1. Check for matching sell orders:
-   SELECT * FROM orders
-   WHERE market_id = $1
-     AND token = 'YES'
-     AND side = 'sell'
-     AND price <= 72           -- seller willing to sell at or below 72¢
-     AND status = 'open'
-   ORDER BY price ASC, created_at ASC
-   LIMIT 1
+#### `POST /api/orders/batch-fill`
 
-2. If match found (e.g., sell YES at 70¢):
-   a. Execute at seller's price (70¢) — price improvement for buyer
-   b. On-chain: transfer YES tokens from seller → buyer
-   c. On-chain: transfer 70¢ USDC from buyer → seller
-   d. Update both orders to 'filled'
-   e. Insert into trades table
-   f. Snapshot new price
+Backend endpoint to trigger batch fill (for queued orders).
 
-3. If no direct match, check for synthetic match:
-   Someone wanting to buy NO at 28¢ is equivalent to someone
-   selling YES at 72¢ (because YES + NO = $1)
+```
+Request:
+{
+    "orderIds": [15, 16, 17]     // pending orders to batch
+}
 
-   If found:
-   a. Call PredictionMarket.mintTokens() — mint YES + NO pair for $1
-   b. Send YES to the YES buyer, NO to the NO buyer
-   c. Combined cost: 72¢ (YES buyer) + 28¢ (NO buyer) = $1
-
-4. If no match at all:
-   a. Store as open order
-   b. Return status: "open"
+Response:
+{
+    "txHash": "0x...",
+    "filledCount": 3
+}
 ```
 
 #### `GET /api/orders/:marketId`
 
-Get current orderbook for a market.
+Get current orderbook (aggregated by price for display).
 
 ```
 Response:
 {
     "marketId": 0,
-    "bids": [                          // buy orders, sorted price descending
-        { "price": 72, "amount": 5000000, "orders": 3 },
-        { "price": 70, "amount": 2000000, "orders": 1 },
-        { "price": 68, "amount": 8000000, "orders": 5 }
+    "bids": [                          // buy YES orders
+        { "price": 72, "shares": 5000000, "orders": 3 },
+        { "price": 70, "shares": 2000000, "orders": 1 }
     ],
-    "asks": [                          // sell orders, sorted price ascending
-        { "price": 74, "amount": 3000000, "orders": 2 },
-        { "price": 76, "amount": 1000000, "orders": 1 },
-        { "price": 80, "amount": 4000000, "orders": 3 }
+    "noBids": [                        // buy NO orders (equivalent to sell YES)
+        { "price": 28, "shares": 5000000, "orders": 2 }
     ],
     "lastPrice": 72,
-    "spread": 2                        // 74 - 72
+    "yesPrice": 72,
+    "noPrice": 28
 }
 ```
 
 #### `DELETE /api/orders/:orderId`
 
-Cancel an open order.
+Cancel a pending order (soft cancel in DB; on-chain nonce already used if filled).
 
 ```
 Response:
@@ -568,7 +623,7 @@ async function getTokenBalance(tokenAddress: string, userAddress: string) {
 }
 ```
 
-### Contract Writes (for order matching)
+### Contract Writes (owner-only)
 
 ```typescript
 import { createWalletClient, http } from "viem";
@@ -578,19 +633,58 @@ const account = privateKeyToAccount(BACKEND_PRIVATE_KEY);
 const walletClient = createWalletClient({
     account,
     chain: sepolia,
-    transport: http("https://ethereum-sepolia-rpc.publicnode.com"),
+    transport: http(RPC_URL),
 });
 
-// Mint token pairs during order matching
-async function mintTokens(marketId: number, to: string, amount: bigint) {
-    // Backend wallet needs USDC approval first
-    const hash = await walletClient.writeContract({
+// Order struct (matches contract)
+type Order = {
+    marketId: bigint;
+    outcome: number;   // 1 = Yes, 2 = No
+    to: `0x${string}`;
+    shares: bigint;
+    cost: bigint;
+    deadline: bigint;
+    nonce: bigint;
+};
+
+// Fill a single signed order (signature = 65 bytes: r + s + v)
+async function fillOrder(order: Order, signature: `0x${string}`) {
+    return walletClient.writeContract({
         address: PREDICTION_MARKET_ADDRESS,
         abi: predictionMarketAbi,
-        functionName: "mintTokens",
-        args: [BigInt(marketId), to, amount],
+        functionName: "fillOrder",
+        args: [order, signature],
     });
-    return hash;
+}
+
+// Batch fill multiple orders
+async function batchFillOrders(orders: Order[], signatures: `0x${string}`[]) {
+    return walletClient.writeContract({
+        address: PREDICTION_MARKET_ADDRESS,
+        abi: predictionMarketAbi,
+        functionName: "batchFillOrders",
+        args: [orders, signatures],
+    });
+}
+
+// Create market (owner only)
+async function createMarket(questionHash: `0x${string}`, resolutionTimestamp: bigint) {
+    return walletClient.writeContract({
+        address: PREDICTION_MARKET_ADDRESS,
+        abi: predictionMarketAbi,
+        functionName: "createMarket",
+        args: [questionHash, resolutionTimestamp],
+    });
+}
+
+// Cancel market (owner only)
+async function cancelMarket(marketId: number) {
+    return walletClient.writeContract({
+        address: PREDICTION_MARKET_ADDRESS,
+        abi: predictionMarketAbi,
+        functionName: "cancelMarket",
+        args: [BigInt(marketId)],
+    });
 }
 ```
 
@@ -601,7 +695,11 @@ async function mintTokens(marketId: number, to: string, amount: bigint) {
 ```
 backend/
 ├── src/
-│   ├── index.ts                  -- Hono app entry point
+│   ├── index.ts                  -- Hono API entry point
+│   ├── watcher/
+│   │   ├── index.ts              -- Watcher entry (event loop)
+│   │   ├── events.ts             -- Event handlers (MarketCreated, OrderFilled, etc.)
+│   │   └── cursor.ts             -- Block cursor (watcher_cursor table)
 │   ├── routes/
 │   │   ├── markets.ts            -- /api/markets/* endpoints
 │   │   ├── orders.ts             -- /api/orders/* endpoints
@@ -609,8 +707,8 @@ backend/
 │   │   └── resolution.ts         -- /api/resolution/* endpoints
 │   ├── services/
 │   │   ├── dedup.ts              -- AI deduplication logic
-│   │   ├── orderbook.ts          -- Order matching engine
-│   │   ├── blockchain.ts         -- viem contract interactions
+│   │   ├── orders.ts             -- Order signing, fillOrder, batchFillOrders
+│   │   ├── blockchain.ts         -- viem contract reads/writes
 │   │   └── pricing.ts            -- Price calculation + snapshots
 │   ├── db/
 │   │   ├── client.ts             -- PostgreSQL connection
@@ -646,34 +744,183 @@ PORT=3001
 
 ---
 
-## Event Listener (Optional Enhancement)
+---
 
-Listen to on-chain events to keep the database in sync:
+## Watcher Service
+
+A **separate service** that listens to on-chain events and updates the database. Runs independently from the API server (e.g. `bun run watcher` or separate deployment).
+
+### Responsibilities
+
+| Event | Action |
+|-------|--------|
+| `MarketCreated` | Insert or update market in DB (if not from our API) |
+| `OrderFilled` | Insert trade, update order status + tx_hash |
+| `MarketResolved` | Update market status + outcome |
+| `MarketCancelled` | Update market status |
+| `WinningsRedeemed` | Optional: record redemption for analytics |
+
+### Architecture
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   API       │     │   Watcher   │     │  PostgreSQL │
+│   (Hono)    │     │   Service   │     │             │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                   │
+       │  fillOrder()       │  getLogs()        │
+       │ ──────────────────►│                   │
+       │                   │  INSERT/UPDATE    │
+       │                   │ ─────────────────►│
+       │                   │                   │
+       │  read from DB     │                   │
+       │ ◄─────────────────────────────────────│
+```
+
+### Implementation
 
 ```typescript
-// Watch for new markets created directly on-chain
-client.watchContractEvent({
-    address: PREDICTION_MARKET_ADDRESS,
-    abi: predictionMarketAbi,
-    eventName: "MarketCreated",
-    onLogs(logs) {
-        for (const log of logs) {
-            syncMarketToDb(log.args);
-        }
-    },
+// watcher/src/index.ts
+import { createPublicClient, http, parseAbiItem } from "viem";
+import { sepolia } from "viem/chains";
+import { db } from "./db";
+
+const client = createPublicClient({
+    chain: sepolia,
+    transport: http(process.env.RPC_URL),
 });
 
-// Watch for resolutions from CRE workflow
-client.watchContractEvent({
-    address: PREDICTION_MARKET_ADDRESS,
-    abi: predictionMarketAbi,
-    eventName: "MarketResolved",
-    onLogs(logs) {
+const CONTRACT = process.env.PREDICTION_MARKET_ADDRESS!;
+const BATCH_SIZE = 2000;
+
+async function getLastBlock(chainId: number): Promise<bigint> {
+    const row = await db.query(
+        "SELECT last_block FROM watcher_cursor WHERE chain_id = $1",
+        [chainId]
+    );
+    return row.rows[0]?.last_block ?? 0n;
+}
+
+async function setLastBlock(chainId: number, block: bigint) {
+    await db.query(
+        `INSERT INTO watcher_cursor (chain_id, contract_address, last_block, updated_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (chain_id) DO UPDATE SET last_block = $3, updated_at = NOW()`,
+        [chainId, CONTRACT, block.toString()]
+    );
+}
+
+async function processMarketCreated(log: any) {
+    const { marketId, yesToken, noToken } = log.args;
+    // Markets are created by API first; watcher updates tx_hash and token addresses
+    await db.query(
+        `UPDATE markets SET tx_hash = $1, yes_token_address = $2, no_token_address = $3 WHERE market_id = $4`,
+        [log.transactionHash, yesToken, noToken, Number(marketId)]
+    );
+}
+
+async function processOrderFilled(log: any) {
+    const { marketId, buyer, outcome, shares, cost } = log.args;
+    const token = outcome === 1 ? "YES" : "NO";
+    await db.query(
+        `INSERT INTO trades (market_id, buyer_address, token, shares, cost, tx_hash, block_number)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [Number(marketId), buyer, token, shares.toString(), cost.toString(), log.transactionHash, log.blockNumber]
+    );
+    // Update matching order status if we have it (match by user, market, shares, cost)
+    await db.query(
+        `UPDATE orders SET status = 'filled', tx_hash = $1, filled_at = NOW()
+         WHERE market_id = $2 AND user_address = $3 AND shares = $4 AND cost = $5 AND status = 'pending'`,
+        [log.transactionHash, Number(marketId), buyer, shares.toString(), cost.toString()]
+    );
+}
+
+async function processMarketResolved(log: any) {
+    const { marketId, outcome } = log.args;
+    const outcomeStr = outcome === 1 ? "YES" : "NO";
+    await db.query(
+        `UPDATE markets SET status = 'resolved', outcome = $1, resolved_at = NOW()
+         WHERE market_id = $2`,
+        [outcomeStr, Number(marketId)]
+    );
+}
+
+async function processMarketCancelled(log: any) {
+    const { marketId } = log.args;
+    await db.query(
+        `UPDATE markets SET status = 'cancelled' WHERE market_id = $1`,
+        [Number(marketId)]
+    );
+}
+
+async function run() {
+    const chainId = sepolia.id;
+    let fromBlock = await getLastBlock(chainId);
+    if (fromBlock === 0n) fromBlock = BigInt(await client.getBlockNumber()) - 1000n; // bootstrap
+
+    while (true) {
+        const toBlock = fromBlock + BigInt(BATCH_SIZE);
+        const logs = await client.getLogs({
+            address: CONTRACT,
+            fromBlock,
+            toBlock,
+            events: [
+                parseAbiItem("event MarketCreated(uint256 indexed marketId, bytes32 questionHash, address creator, address yesToken, address noToken, uint256 resolutionTimestamp)"),
+                parseAbiItem("event OrderFilled(uint256 indexed marketId, address indexed buyer, uint8 outcome, uint256 shares, uint256 cost)"),
+                parseAbiItem("event MarketResolved(uint256 indexed marketId, uint8 outcome)"),
+                parseAbiItem("event MarketCancelled(uint256 indexed marketId)"),
+            ],
+        });
+
         for (const log of logs) {
-            updateMarketResolution(log.args);
+            try {
+                if (log.eventName === "MarketCreated") await processMarketCreated(log);
+                else if (log.eventName === "OrderFilled") await processOrderFilled(log);
+                else if (log.eventName === "MarketResolved") await processMarketResolved(log);
+                else if (log.eventName === "MarketCancelled") await processMarketCancelled(log);
+            } catch (e) {
+                console.error("Watcher error:", e);
+            }
         }
-    },
-});
+
+        await setLastBlock(chainId, toBlock);
+        fromBlock = toBlock + 1n;
+        await new Promise((r) => setTimeout(r, 1000)); // rate limit
+    }
+}
+
+run();
+```
+
+### Project Structure (with Watcher)
+
+```
+backend/
+├── src/
+│   ├── index.ts                  -- Hono API
+│   ├── watcher/
+│   │   ├── index.ts              -- Watcher entry point
+│   │   ├── events.ts             -- Event handlers
+│   │   └── cursor.ts             -- Block cursor management
+│   ├── routes/
+│   ├── services/
+│   └── db/
+├── package.json
+└── .env
+```
+
+### Running the Watcher
+
+```bash
+# In package.json
+"scripts": {
+    "start": "bun run src/index.ts",
+    "watcher": "bun run src/watcher/index.ts"
+}
+
+# Run both (e.g. in Docker Compose or PM2)
+bun run start &    # API server
+bun run watcher   # Event watcher
 ```
 
 ---
@@ -684,21 +931,23 @@ For the demo, prioritize these endpoints:
 
 ```
 Must have:
-  POST /api/markets/create         -- with AI dedup
+  POST /api/markets/create         -- with AI dedup (owner only)
   GET  /api/markets                -- list markets
   GET  /api/markets/:id            -- market detail
-  POST /api/orders                 -- place order (with matching)
+  POST /api/orders/quote           -- get order payload for signing
+  POST /api/orders                 -- submit signed order, fill on-chain
   GET  /api/orders/:marketId       -- orderbook
-  GET  /api/portfolio/:address     -- user positions
+  GET  /api/portfolio/:address    -- user positions (read from chain or DB)
+  Watcher service                  -- event listener, keeps DB in sync
 
 Nice to have:
   GET  /api/markets/check-duplicate -- live dedup as user types
-  DELETE /api/orders/:id           -- cancel order
+  POST /api/orders/batch-fill      -- batch fill queued orders
+  DELETE /api/orders/:id           -- cancel pending order
   GET  /api/portfolio/:address/history -- trade history
   GET  /api/resolution/:marketId   -- resolution details
 
 Skip for MVP:
-  Event listener (sync manually or on request)
   WebSocket price updates (use polling)
   Rate limiting / auth middleware
 ```
