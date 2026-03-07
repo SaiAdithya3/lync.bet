@@ -115,10 +115,32 @@ async fn list_markets(
     let total: i64 = {
         #[derive(sqlx::FromRow)]
         struct C { count: i64 }
-        let row: C = sqlx::query_as("SELECT COUNT(*) as count FROM markets")
-            .fetch_one(&state.db)
-            .await
-            .map_err(AppError::Db)?;
+        let row: C = if q.status.as_deref() == Some("all") {
+            if let Some(cat) = &q.category {
+                sqlx::query_as("SELECT COUNT(*) as count FROM markets WHERE category = $1")
+                    .bind(cat)
+                    .fetch_one(&state.db)
+                    .await
+            } else {
+                sqlx::query_as("SELECT COUNT(*) as count FROM markets")
+                    .fetch_one(&state.db)
+                    .await
+            }
+        } else {
+            let status = q.status.as_deref().unwrap_or("open");
+            if let Some(cat) = &q.category {
+                sqlx::query_as("SELECT COUNT(*) as count FROM markets WHERE status = $1 AND category = $2")
+                    .bind(status)
+                    .bind(cat)
+                    .fetch_one(&state.db)
+                    .await
+            } else {
+                sqlx::query_as("SELECT COUNT(*) as count FROM markets WHERE status = $1")
+                    .bind(status)
+                    .fetch_one(&state.db)
+                    .await
+            }
+        }.map_err(AppError::Db)?;
         row.count
     };
 

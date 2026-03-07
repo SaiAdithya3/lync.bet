@@ -28,6 +28,11 @@ fn format_address(a: Address) -> String {
     format!("{:?}", a).to_lowercase()
 }
 
+fn format_tx_hash(h: Option<H256>) -> String {
+    h.map(|h| format!("{:?}", h).to_lowercase())
+        .unwrap_or_default()
+}
+
 #[instrument(skip(pool, log), fields(tx = ?log.transaction_hash,
     block = ?log.block_number))]
 pub async fn process_log(pool: &PgPool, log: &Log) -> Result<()> {
@@ -66,7 +71,7 @@ async fn process_market_created(pool: &PgPool, log: &Log) -> Result<()> {
     let yes_token = Address::from_slice(&data[76..96]);
     let no_token = Address::from_slice(&data[108..128]);
 
-    let tx_hash = format!("{:?}", log.transaction_hash).to_lowercase();
+    let tx_hash = format_tx_hash(log.transaction_hash);
     let market_id_num = market_id.as_u64() as i32;
 
     // Update existing market (created by API) or insert if from external source
@@ -109,27 +114,25 @@ async fn process_order_filled(pool: &PgPool, log: &Log) -> Result<()> {
         .unwrap_or_default();
 
     let data = &log.data.0;
-    if data.len() < 64 {
+    if data.len() < 96 {
+        tracing::warn!("OrderFilled: insufficient data len {}", data.len());
         return Ok(());
     }
-    let shares = U256::from_big_endian(&data[0..32]);
-    let cost = U256::from_big_endian(&data[32..64]);
+    // ABI layout follows non-indexed param order: outcome(uint8), shares(uint256), cost(uint256)
+    let outcome = U256::from_big_endian(&data[0..32]).as_u64();
+    let shares = U256::from_big_endian(&data[32..64]);
+    let cost = U256::from_big_endian(&data[64..96]);
 
-    let outcome = if data.len() >= 96 {
-        U256::from_big_endian(&data[64..96]).as_u64()
-    } else {
-        1
-    };
     let token = if outcome == 1 { "YES" } else { "NO" };
 
-    let tx_hash = format!("{:?}", log.transaction_hash).to_lowercase();
+    let tx_hash = format_tx_hash(log.transaction_hash);
     let block_number = log.block_number.map(|b| b.as_u64() as i64);
 
-    // Insert trade (ignore duplicate on same tx+market+buyer+shares)
     let _ = sqlx::query(
         r#"
         INSERT INTO trades (market_id, buyer_address, token, shares, cost, tx_hash, block_number)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (tx_hash, market_id, buyer_address, token) DO NOTHING
         "#,
     )
     .bind(market_id.as_u64() as i32)

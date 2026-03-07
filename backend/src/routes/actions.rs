@@ -26,6 +26,7 @@ async fn get_user_actions(
     Path(address): Path<String>,
     Query(query): Query<ActionQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let address = address.to_lowercase();
     let status = query.status.as_deref().unwrap_or("pending");
 
     let actions: Vec<ActionRow> = sqlx::query_as(

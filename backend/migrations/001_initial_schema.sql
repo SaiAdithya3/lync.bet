@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS orders (
     cost            BIGINT NOT NULL,
     price           INTEGER NOT NULL,
     nonce           BIGINT NOT NULL,
+    deadline        BIGINT NOT NULL,
     signature       BYTEA NOT NULL,
     status          VARCHAR(15) NOT NULL DEFAULT 'pending',
     tx_hash         VARCHAR(66),
@@ -54,7 +55,8 @@ CREATE TABLE IF NOT EXISTS trades (
     cost            BIGINT NOT NULL,
     tx_hash         VARCHAR(66) NOT NULL,
     block_number    BIGINT,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(tx_hash, market_id, buyer_address, token)
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_market ON trades(market_id);
@@ -72,20 +74,6 @@ CREATE TABLE IF NOT EXISTS price_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_price_snapshots_market ON price_snapshots(market_id, timestamp);
-
--- Orderbook levels (aggregated pending orders for probability calculation)
-CREATE TABLE IF NOT EXISTS orderbook_levels (
-    id              SERIAL PRIMARY KEY,
-    market_id       INTEGER NOT NULL REFERENCES markets(market_id),
-    side            VARCHAR(3) NOT NULL,
-    price           INTEGER NOT NULL,
-    total_shares    BIGINT NOT NULL DEFAULT 0,
-    order_count     INTEGER NOT NULL DEFAULT 0,
-    updated_at      TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(market_id, side, price)
-);
-
-CREATE INDEX IF NOT EXISTS idx_orderbook_market ON orderbook_levels(market_id);
 
 -- Action mapper: maps user actions to required blockchain operations
 CREATE TABLE IF NOT EXISTS action_mapper (

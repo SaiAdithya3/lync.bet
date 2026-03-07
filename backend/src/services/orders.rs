@@ -149,22 +149,23 @@ impl OrderService {
             return Err(AppError::InvalidSignature);
         }
 
-        // Persist with status=pending
+        let user_address_lower = user_address.to_lowercase();
         let row: (i32,) = sqlx::query_as(
             r#"
             INSERT INTO orders
-                (market_id, user_address, token, shares, cost, price, nonce, signature, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+                (market_id, user_address, token, shares, cost, price, nonce, deadline, signature, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
             RETURNING id
             "#,
         )
         .bind(market_id)
-        .bind(user_address)
+        .bind(&user_address_lower)
         .bind(token.to_uppercase())
         .bind(shares)
         .bind(cost)
         .bind(price)
         .bind(nonce)
+        .bind(deadline)
         .bind(&sig_bytes)
         .fetch_one(&self.db)
         .await
@@ -223,6 +224,7 @@ impl OrderService {
         user_address: &str,
         market_id: Option<i32>,
     ) -> Result<Vec<UserOrderRow>, AppError> {
+        let addr = user_address.to_lowercase();
         let rows = if let Some(mid) = market_id {
             sqlx::query_as::<_, UserOrderRow>(
                 r#"
@@ -233,7 +235,7 @@ impl OrderService {
                 ORDER BY created_at DESC
                 "#,
             )
-            .bind(user_address)
+            .bind(&addr)
             .bind(mid)
             .fetch_all(&self.db)
             .await
@@ -247,7 +249,7 @@ impl OrderService {
                 ORDER BY created_at DESC
                 "#,
             )
-            .bind(user_address)
+            .bind(&addr)
             .fetch_all(&self.db)
             .await
         }
@@ -266,6 +268,7 @@ impl OrderService {
         required_tx: &str,
         payload: Option<serde_json::Value>,
     ) -> Result<i32, AppError> {
+        let addr = user_address.to_lowercase();
         let row: (i32,) = sqlx::query_as(
             r#"
             INSERT INTO action_mapper
@@ -275,7 +278,7 @@ impl OrderService {
             "#,
         )
         .bind(action_type)
-        .bind(user_address)
+        .bind(&addr)
         .bind(market_id)
         .bind(order_id)
         .bind(required_tx)

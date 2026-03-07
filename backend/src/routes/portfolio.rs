@@ -24,7 +24,7 @@ async fn get_portfolio(
     State(state): State<AppState>,
     Path(address): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    // Aggregate filled orders by (market_id, token) so we get one row per position
+    let address = address.to_lowercase();
     let positions: Vec<PositionRow> = sqlx::query_as(
         r#"
         SELECT
@@ -132,6 +132,7 @@ async fn get_trade_history(
     State(state): State<AppState>,
     Path(address): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let address = address.to_lowercase();
     let trades: Vec<TradeRow> = sqlx::query_as(
         r#"
         SELECT t.id, t.market_id, m.question, t.token, t.shares,
@@ -178,10 +179,10 @@ async fn get_redemption_status(
     State(state): State<AppState>,
     Path(address): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let address = address.to_lowercase();
     let contract_address = std::env::var("PREDICTION_MARKET_ADDRESS")
         .unwrap_or_else(|_| "0x45e7911Af8c31bDeDf8A586BeEd8efEcACEb9c37".into());
 
-    // Join orders with markets: user must have a FILLED order on the winning side
     let redeemable: Vec<RedemptionRow> = sqlx::query_as(
         r#"
         SELECT
@@ -198,7 +199,6 @@ async fn get_redemption_status(
           AND m.outcome  IS NOT NULL
           AND o.user_address = $1
           AND o.status   = 'filled'
-          -- Only include the winning side
           AND o.token    = m.outcome
         GROUP BY m.market_id, m.question, m.outcome,
                  m.yes_token_address, m.no_token_address
