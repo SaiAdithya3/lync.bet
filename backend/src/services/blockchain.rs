@@ -15,26 +15,26 @@ const EIP712_DOMAIN_TYPEHASH: &str =
 const ORDER_TYPEHASH: &str =
     "Order(uint256 marketId,uint8 outcome,address to,uint256 shares,uint256 cost,uint256 deadline,uint256 nonce)";
 
+/// Extract the first 4 bytes of a keccak256 hash as a function selector.
+fn selector(signature: &str) -> [u8; 4] {
+    let hash = keccak256(signature.as_bytes());
+    [hash[0], hash[1], hash[2], hash[3]]
+}
+
 /// ABI-encoded function selector for `nonces(address)`.
 fn nonces_selector() -> [u8; 4] {
-    keccak256("nonces(address)")[..4].try_into().unwrap()
+    selector("nonces(address)")
 }
 
 /// ABI-encoded function selector for `createMarket(bytes32,uint256)`.
 fn create_market_selector() -> [u8; 4] {
-    keccak256("createMarket(bytes32,uint256)")[..4]
-        .try_into()
-        .unwrap()
+    selector("createMarket(bytes32,uint256)")
 }
 
 /// ABI-encoded function selector for
 /// `fillOrder((uint256,uint8,address,uint256,uint256,uint256,uint256),bytes)`.
 fn fill_order_selector() -> [u8; 4] {
-    keccak256(
-        "fillOrder((uint256,uint8,address,uint256,uint256,uint256,uint256),bytes)",
-    )[..4]
-    .try_into()
-    .unwrap()
+    selector("fillOrder((uint256,uint8,address,uint256,uint256,uint256,uint256),bytes)")
 }
 
 // ── Order struct ──────────────────────────────────────────────────────────────
@@ -266,6 +266,102 @@ impl BlockchainService {
         Ok(receipt.transaction_hash)
     }
 
+    /// ABI-encoded function selector for
+    /// `batchFillOrders((uint256,uint8,address,uint256,uint256,uint256,uint256)[],bytes[])`.
+    fn batch_fill_orders_selector() -> [u8; 4] {
+        selector("batchFillOrders((uint256,uint8,address,uint256,uint256,uint256,uint256)[],bytes[])")
+    }
+
+    /// ABI-encoded function selector for `cancelMarket(uint256)`.
+    fn cancel_market_selector() -> [u8; 4] {
+        selector("cancelMarket(uint256)")
+    }
+
+    /// Submit batchFillOrders on-chain as the backend owner wallet.
+    pub async fn batch_fill_orders(
+        &self,
+        orders: Vec<ContractOrder>,
+        signatures: Vec<Bytes>,
+    ) -> Result<H256> {
+        let wallet = self
+            .wallet
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("BACKEND_PRIVATE_KEY not set"))?;
+
+        if orders.len() != signatures.len() {
+            return Err(anyhow::anyhow!("orders and signatures length mismatch"));
+        }
+
+        let order_tuples: Vec<Token> = orders
+            .iter()
+            .map(|o| Token::Tuple(o.abi_encode_tuple()))
+            .collect();
+        let sig_bytes: Vec<Token> = signatures
+            .iter()
+            .map(|s| Token::Bytes(s.to_vec()))
+            .collect();
+
+        let mut calldata = Self::batch_fill_orders_selector().to_vec();
+        calldata.extend_from_slice(&encode(&[
+            Token::Array(order_tuples),
+            Token::Array(sig_bytes),
+        ]));
+
+        let nonce = self.provider.get_transaction_count(wallet.address(), None).await?;
+        let gas_price = self.provider.get_gas_price().await?;
+
+        let tx = TransactionRequest::new()
+            .to(self.contract_address)
+            .data(calldata)
+            .nonce(nonce)
+            .gas_price(gas_price)
+            .gas(500_000u64 * orders.len() as u64) // scale gas with batch size
+            .chain_id(self.chain_id);
+
+        let signed = wallet.sign_transaction(&tx.clone().into()).await?;
+        let raw = tx.rlp_signed(&signed);
+        let pending = self.provider.send_raw_transaction(raw).await?;
+        let receipt = pending
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Transaction dropped from mempool"))?;
+
+        Ok(receipt.transaction_hash)
+    }
+
+    /// Call `cancelMarket(uint256 marketId)` on-chain. Owner only.
+    pub async fn cancel_market(&self, market_id: u64) -> Result<H256> {
+        let wallet = self
+            .wallet
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("BACKEND_PRIVATE_KEY not set"))?;
+
+        let mut calldata = Self::cancel_market_selector().to_vec();
+        calldata.extend_from_slice(&encode(&[Token::Uint(U256::from(market_id))]));
+
+        let nonce = self
+            .provider
+            .get_transaction_count(wallet.address(), None)
+            .await?;
+        let gas_price = self.provider.get_gas_price().await?;
+
+        let tx = TransactionRequest::new()
+            .to(self.contract_address)
+            .data(calldata)
+            .nonce(nonce)
+            .gas_price(gas_price)
+            .gas(200_000u64)
+            .chain_id(self.chain_id);
+
+        let signed = wallet.sign_transaction(&tx.clone().into()).await?;
+        let raw = tx.rlp_signed(&signed);
+        let pending = self.provider.send_raw_transaction(raw).await?;
+        let receipt = pending
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Transaction dropped from mempool"))?;
+
+        Ok(receipt.transaction_hash)
+    }
+
     pub fn build_order(
         &self,
         market_id: u64,
@@ -275,15 +371,18 @@ impl BlockchainService {
         cost: u64,
         deadline: u64,
         nonce: u64,
-    ) -> ContractOrder {
-        ContractOrder {
+    ) -> Result<ContractOrder> {
+        let to_addr: Address = to
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid address: {}", to))?;
+        Ok(ContractOrder {
             market_id: U256::from(market_id),
             outcome,
-            to: to.parse().expect("invalid address"),
+            to: to_addr,
             shares: U256::from(shares),
             cost: U256::from(cost),
             deadline: U256::from(deadline),
             nonce: U256::from(nonce),
-        }
+        })
     }
 }

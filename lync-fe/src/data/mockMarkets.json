@@ -1,0 +1,99 @@
+[
+  {
+    "id": "m1",
+    "title": "Will Bitcoin reach $100k by end of 2025?",
+    "description": "Resolves YES if BTC/USD closes above $100,000 on any major exchange on or before Dec 31, 2025.",
+    "yesProbability": 0.62,
+    "noProbability": 0.38,
+    "volume": 2450000,
+    "liquidity": 180000,
+    "participants": 3421,
+    "endDate": "2025-12-31T23:59:59Z",
+    "category": "Crypto",
+    "createdAt": "2024-01-15T10:00:00Z"
+  },
+  {
+    "id": "m2",
+    "title": "Will Fed cut rates in March 2025?",
+    "description": "Resolves YES if the Federal Reserve announces a rate cut at the March 2025 FOMC meeting.",
+    "yesProbability": 0.48,
+    "noProbability": 0.52,
+    "volume": 1890000,
+    "liquidity": 120000,
+    "participants": 2103,
+    "endDate": "2025-03-19T18:00:00Z",
+    "category": "Politics",
+    "createdAt": "2024-02-01T08:00:00Z"
+  },
+  {
+    "id": "m3",
+    "title": "Will OpenAI release GPT-5 in 2025?",
+    "description": "Resolves YES if OpenAI publicly releases a model named GPT-5 (or equivalent next-gen) in 2025.",
+    "yesProbability": 0.71,
+    "noProbability": 0.29,
+    "volume": 920000,
+    "liquidity": 85000,
+    "participants": 1567,
+    "endDate": "2025-12-31T23:59:59Z",
+    "category": "Tech",
+    "createdAt": "2024-03-10T12:00:00Z"
+  },
+  {
+    "id": "m4",
+    "title": "Will Tesla deliver 2M vehicles in 2025?",
+    "description": "Resolves YES if Tesla reports 2 million or more vehicle deliveries for FY 2025.",
+    "yesProbability": 0.55,
+    "noProbability": 0.45,
+    "volume": 678000,
+    "liquidity": 62000,
+    "participants": 892,
+    "endDate": "2026-01-31T23:59:59Z",
+    "category": "Business",
+    "createdAt": "2024-04-05T09:00:00Z"
+  },
+  {
+    "id": "m5",
+    "title": "Will it snow in NYC on Christmas 2025?",
+    "description": "Resolves YES if Central Park records at least 0.1 inch of snowfall on Dec 25, 2025.",
+    "yesProbability": 0.28,
+    "noProbability": 0.72,
+    "volume": 234000,
+    "liquidity": 28000,
+    "participants": 445,
+    "endDate": "2025-12-25T23:59:59Z",
+    "category": "Other",
+    "createdAt": "2024-11-01T00:00:00Z"
+  },
+  {
+    "id": "m6",
+    "title": "Will Ethereum switch to full PoS by Q2 2025?",
+    "description": "Resolves YES if Ethereum mainnet has no PoW component by June 30, 2025.",
+    "yesProbability": 0.89,
+    "noProbability": 0.11,
+    "volume": 456000,
+    "liquidity": 41000,
+    "participants": 623,
+    "endDate": "2025-06-30T23:59:59Z",
+    "category": "Crypto",
+    "createdAt": "2024-06-01T14:00:00Z"
+  },
+  {
+    "id": "m7",
+    "title": "US forces enter Iran by..?",
+    "description": "This market will resolve to Yes if active US military personnel physically enter Iran at any point by the listed date (ET). Otherwise it resolves to No.",
+    "yesProbability": 0.19,
+    "noProbability": 0.81,
+    "volume": 10756279,
+    "liquidity": 520000,
+    "participants": 4521,
+    "endDate": "2026-12-31T23:59:59Z",
+    "category": "Politics",
+    "createdAt": "2024-06-15T10:00:00Z",
+    "outcomes": [
+      { "id": "m7-mar7", "label": "March 7", "yesProbability": 0.01, "noProbability": 0.99, "volume": 3770287, "endDate": "2026-03-07T23:59:59Z" },
+      { "id": "m7-mar14", "label": "March 14", "yesProbability": 0.19, "noProbability": 0.81, "volume": 1426651, "endDate": "2026-03-14T23:59:59Z" },
+      { "id": "m7-mar31", "label": "March 31", "yesProbability": 0.32, "noProbability": 0.68, "volume": 2843247, "endDate": "2026-03-31T23:59:59Z" },
+      { "id": "m7-dec31", "label": "December 31", "yesProbability": 0.59, "noProbability": 0.41, "volume": 641726, "endDate": "2026-12-31T23:59:59Z" }
+    ]
+  }
+]

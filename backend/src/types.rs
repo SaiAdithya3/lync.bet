@@ -50,6 +50,12 @@ pub struct SubmitOrderRequest {
     pub recipient_address: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchFillRequest {
+    /// List of pending order IDs to fill in a single batch transaction
+    pub order_ids: Vec<i32>,
+}
+
 // ── Response bodies ───────────────────────────────────────────────────────────
 
 /// The order struct the user must sign (returned by /quote).

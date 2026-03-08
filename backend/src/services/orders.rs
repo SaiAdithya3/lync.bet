@@ -46,15 +46,17 @@ impl OrderService {
             .map_err(|e| AppError::Blockchain(format!("get_nonce: {e}")))?;
         let deadline = chrono::Utc::now().timestamp() + 3600; // 1-hour window
 
-        let contract_order = blockchain.build_order(
-            market_id as u64,
-            outcome,
-            to,
-            shares as u64,
-            cost as u64,
-            deadline as u64,
-            nonce,
-        );
+        let contract_order = blockchain
+            .build_order(
+                market_id as u64,
+                outcome,
+                to,
+                shares as u64,
+                cost as u64,
+                deadline as u64,
+                nonce,
+            )
+            .map_err(|e| AppError::InvalidOrder(format!("build_order: {e}")))?;
 
         // Computed locally from the pre-built domain separator — no RPC call needed.
         let digest = blockchain.get_order_digest(&contract_order);
@@ -173,15 +175,17 @@ impl OrderService {
 
         let order_id = row.0;
 
-        let contract_order = blockchain.build_order(
-            market_id as u64,
-            outcome,
-            to,
-            shares as u64,
-            cost as u64,
-            deadline as u64,
-            nonce as u64,
-        );
+        let contract_order = blockchain
+            .build_order(
+                market_id as u64,
+                outcome,
+                to,
+                shares as u64,
+                cost as u64,
+                deadline as u64,
+                nonce as u64,
+            )
+            .map_err(|e| AppError::InvalidOrder(format!("build_order: {e}")))?;
         let signature = Bytes::from(sig_bytes);
 
         let tx_hash = match blockchain.fill_order(contract_order, signature).await {

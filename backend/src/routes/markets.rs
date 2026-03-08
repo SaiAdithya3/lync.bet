@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use ethers::utils::keccak256;
@@ -35,6 +35,7 @@ pub fn router() -> Router<AppState> {
         .route("/:market_id/price", get(get_market_price))
         .route("/:market_id/activity", get(get_market_activity))
         .route("/:market_id/positions", get(get_market_positions))
+        .route("/:market_id/cancel", post(cancel_market))
 }
 
 /// POST /api/markets
@@ -620,6 +621,60 @@ async fn get_market_positions(
         "yesShares":   yes_shares,
         "noShares":    no_shares,
         "totalHolders": yes_holders + no_holders
+    })))
+}
+
+/// POST /api/markets/:market_id/cancel
+/// Cancel an open market. Calls cancelMarket on-chain and updates DB.
+async fn cancel_market(
+    State(state): State<AppState>,
+    Path(market_id): Path<i32>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Verify market exists and is open
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM markets WHERE market_id = $1",
+    )
+    .bind(market_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    match status.as_deref() {
+        None => return Err(AppError::MarketNotFound(market_id)),
+        Some("open") => {}
+        Some(s) => {
+            return Err(AppError::BadRequest(format!(
+                "Cannot cancel market with status '{s}'"
+            )))
+        }
+    }
+
+    let tx_hash = state
+        .blockchain
+        .cancel_market(market_id as u64)
+        .await
+        .map_err(|e| AppError::Blockchain(format!("cancelMarket tx failed: {e}")))?;
+
+    let tx_hex = format!("{tx_hash:#x}");
+
+    // Update DB optimistically (watcher will confirm)
+    sqlx::query("UPDATE markets SET status = 'cancelled' WHERE market_id = $1")
+        .bind(market_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Db)?;
+
+    // Cancel all pending orders for this market
+    sqlx::query("UPDATE orders SET status = 'cancelled' WHERE market_id = $1 AND status = 'pending'")
+        .bind(market_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Db)?;
+
+    Ok(Json(serde_json::json!({
+        "marketId": market_id,
+        "status":   "cancelled",
+        "txHash":   tx_hex
     })))
 }
 

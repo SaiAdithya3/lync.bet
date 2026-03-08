@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+@theme {
+  /* Brand - Primary */
+  --color-primary: #0048ff;
+  --color-primary-dark: #010353;
+  --color-primary-50: #e6eeff;
+  --color-primary-100: #b3c7ff;
+  --color-primary-200: #80a0ff;
+  --color-primary-300: #4d79ff;
+  --color-primary-400: #1a52ff;
+  --color-primary-500: #0048ff;
+  --color-primary-600: #0039cc;
+  --color-primary-700: #002a99;
+  --color-primary-800: #001b66;
+  --color-primary-900: #010353;
+
+  /* YES / NO – Polymarket-style muted (low pressure) */
+  --color-yes: #38a169;
+  --color-yes-muted: #2f855a;
+  --color-no: #e53e3e;
+  --color-no-muted: #c53030;
+
+  /* Neutrals – calm dark */
+  --color-neutral-bg: #0a0e17;
+  --color-card: #111827;
+  --color-border: #1e293b;
+  --color-muted: #64748b;
+  --color-muted-foreground: #94a3b8;
+}
+
+/* Base – subtle depth like Polymarket */
+@layer base {
+  body {
+    @apply bg-neutral-bg text-white antialiased;
+  }
+}
+
+/* Optional: very subtle center glow (Polymarket-style depth) */
+.app-grid {
+  background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(0, 72, 255, 0.04) 0%, transparent 60%);
+}

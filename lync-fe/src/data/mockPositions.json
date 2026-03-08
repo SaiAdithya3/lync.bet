@@ -1,0 +1,12 @@
+[
+  {
+    "id": "pos1",
+    "marketId": "m1",
+    "marketTitle": "Will Bitcoin reach $100k by end of 2025?",
+    "side": "YES",
+    "shares": 50,
+    "avgPrice": 0.58,
+    "currentValue": 31,
+    "pnl": 2
+  }
+]
