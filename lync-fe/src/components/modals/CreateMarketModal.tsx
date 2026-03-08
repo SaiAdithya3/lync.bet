@@ -5,6 +5,8 @@ import { Button } from "../ui/Button";
 import { useUIStore } from "../../stores/uiStore";
 import { useAccount } from "wagmi";
 import { useMarketStore } from "../../stores/marketStore";
+import { useToastStore } from "../../stores/toastStore";
+import { consolidateErrorMessage } from "../../utils/errorMessage";
 import { marketService } from "../../services/marketService";
 
 type OutcomeRow = { id: string; label: string; resolutionDate: string };
@@ -91,8 +93,11 @@ export function CreateMarketModal() {
       setResolutionTime("23:59");
       setOutcomes([]);
       setOpenModal(null);
+      useToastStore.getState().success("Market created successfully.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create market");
+      const message = consolidateErrorMessage(err, "Failed to create market.");
+      setError(message);
+      useToastStore.getState().error(message, "Create market failed");
     } finally {
       setLoading(false);
     }

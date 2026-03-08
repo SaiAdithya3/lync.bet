@@ -3,6 +3,7 @@ import { AppLayout } from "../components/layout/AppLayout";
 import { TradeModal } from "../components/modals/TradeModal";
 import { WalletModal } from "../components/modals/WalletModal";
 import { CreateMarketModal } from "../components/modals/CreateMarketModal";
+import { ToastContainer } from "../components/ui/ToastContainer";
 import { MarketExplorerPage } from "./pages/MarketExplorerPage";
 import { MarketDetailPage } from "./pages/MarketDetailPage";
 import { CreateMarketPage } from "./pages/CreateMarketPage";
@@ -18,6 +19,7 @@ function RootLayout() {
       <TradeModal />
       <WalletModal />
       <CreateMarketModal />
+      <ToastContainer />
     </>
   );
 }
