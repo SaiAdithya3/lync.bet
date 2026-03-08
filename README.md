@@ -1,4 +1,4 @@
-# Chainlink-hackathon
+# Convergence Chainlink Hackathon
 <img width="1000" height="500" alt="Group 1 (1)" src="https://github.com/user-attachments/assets/6db3e759-ba98-45cb-b3c1-ac5699a1ff67" />
 
 
