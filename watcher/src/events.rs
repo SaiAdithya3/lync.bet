@@ -86,13 +86,14 @@ async fn process_market_created(pool: &PgPool, log: &Log) -> Result<()> {
     let tx_hash = format_tx_hash(log.transaction_hash);
     let market_id_num = market_id.as_u64() as i32;
 
-    // Try to update an existing row first (backend pre-inserts on POST /api/markets)
+    // Try to update an existing row by market_id first (exact match)
     let result = sqlx::query(
         r#"
         UPDATE markets
         SET tx_hash = $1,
             yes_token_address = $2,
             no_token_address = $3,
+            market_id = $4,
             status = 'open'
         WHERE market_id = $4
         "#,
@@ -104,7 +105,32 @@ async fn process_market_created(pool: &PgPool, log: &Log) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // If no row existed (market created externally / script), insert it
+    // Fallback: match by question_hash (backend pre-inserted with question_hash but
+    // the market_id might differ if there was a desync)
+    let result = if result.rows_affected() == 0 {
+        sqlx::query(
+            r#"
+            UPDATE markets
+            SET tx_hash = $1,
+                yes_token_address = $2,
+                no_token_address = $3,
+                market_id = $4,
+                status = 'open'
+            WHERE question_hash = $5 AND (status = 'pending' OR yes_token_address IS NULL)
+            "#,
+        )
+        .bind(&tx_hash)
+        .bind(format_address(yes_token))
+        .bind(format_address(no_token))
+        .bind(market_id_num)
+        .bind(question_hash)
+        .execute(pool)
+        .await?
+    } else {
+        result
+    };
+
+    // If still no match (market created externally / script), insert it
     if result.rows_affected() == 0 {
         let resolution_secs = resolution_ts.as_u64() as i64;
         sqlx::query(

@@ -1,0 +1,12 @@
+.env
+.DS_Store
+.cursor
+*.log
+coverage
+.vscode
+.idea
+node_modules
+dist
+dist-ssr
+*.local
+.env*

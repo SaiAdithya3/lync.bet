@@ -36,6 +36,11 @@ fn create_market_selector() -> [u8; 4] {
     selector("createMarket(bytes32,uint256)")
 }
 
+/// ABI-encoded function selector for `marketCount()`.
+fn market_count_selector() -> [u8; 4] {
+    keccak256("marketCount()")[..4].try_into().unwrap()
+}
+
 /// ABI-encoded function selector for
 /// `fillOrder((uint256,uint8,address,uint256,uint256,uint256,uint256),bytes)`.
 fn fill_order_selector() -> [u8; 4] {
@@ -256,6 +261,25 @@ impl BlockchainService {
             .ok_or_else(|| anyhow::anyhow!("Transaction dropped from mempool"))?;
 
         Ok(receipt.transaction_hash)
+    }
+
+    /// Read the on-chain `marketCount` — the ID that the next `createMarket` call will assign.
+    pub async fn get_market_count(&self) -> Result<u64> {
+        let calldata = market_count_selector().to_vec();
+
+        let result = self
+            .provider
+            .call(
+                &TransactionRequest::new()
+                    .to(self.contract_address)
+                    .data(calldata)
+                    .into(),
+                None,
+            )
+            .await?;
+
+        let n = U256::from_big_endian(&result);
+        Ok(n.as_u64())
     }
 
     /// Call `createMarket(bytes32 questionHash, uint256 resolutionTimestamp)` on-chain.

@@ -82,13 +82,14 @@ async fn create_market(
         return Err(AppError::SimilarMarketExists(question.clone()));
     }
 
-    // Determine the next market_id (matches on-chain marketCount)
-    let next_id: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(market_id), -1) + 1 FROM markets",
-    )
-    .fetch_one(&state.db)
-    .await
-    .map_err(AppError::Db)?;
+    // Read on-chain marketCount — this is the exact ID the contract will assign next.
+    // Using the contract as source of truth avoids desync if markets are created externally.
+    let next_id: i32 = state
+        .blockchain
+        .get_market_count()
+        .await
+        .map_err(|e| AppError::Blockchain(format!("Failed to read marketCount: {e}")))?
+        as i32;
 
     let creator = req.creator_address.to_lowercase();
 
