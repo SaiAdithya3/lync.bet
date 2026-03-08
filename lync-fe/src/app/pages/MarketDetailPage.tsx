@@ -123,10 +123,12 @@ export function MarketDetailPage() {
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
         <div className="lg:col-span-2 space-y-6">
           <Card className="border-border/60 bg-card" padding="none">
-            <div className="border-b border-white/6 px-5 py-3">
-              <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Probability</h2>
-            </div>
-            <ProbabilityChart height={320} className="px-4 pb-4" />
+            <ProbabilityChart
+              height={320}
+              className="px-5 py-4"
+              yesProbability={yesProbability}
+              noProbability={noProbability}
+            />
           </Card>
           <div className="block lg:hidden">
             <TradePanel

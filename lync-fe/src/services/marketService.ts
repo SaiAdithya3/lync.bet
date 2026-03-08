@@ -220,9 +220,28 @@ export const marketService = {
     const data = (await res.json()) as BackendMarketDetailResponse;
     const history = data.priceHistory ?? [];
     return history.map((p) => ({
-      time: p.timestamp ? new Date(p.timestamp).toISOString().slice(0, 10) : "",
+      time: p.timestamp
+        ? String(Math.floor(new Date(p.timestamp).getTime() / 1000))
+        : "",
       value: p.yes_price / 100,
     }));
+  },
+
+  async getMarketPrice(marketId: string): Promise<{
+    yesPrice: number;
+    noPrice: number;
+    yesProbability: number;
+    noProbability: number;
+  } | null> {
+    const id = parseInt(marketId, 10);
+    if (Number.isNaN(id)) return null;
+    try {
+      const res = await fetch(`${API_BASE}/api/markets/${id}/price`);
+      if (!res.ok) return null;
+      return res.json();
+    } catch {
+      return null;
+    }
   },
 
   async getOrderBook(marketId: string): Promise<OrderBookEntry[]> {
