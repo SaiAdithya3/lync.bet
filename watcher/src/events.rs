@@ -4,25 +4,35 @@
 use anyhow::Result;
 use ethers::types::{Address, Log, H256, U256};
 use sqlx::PgPool;
-use std::str::FromStr;
 use tracing::instrument;
 
-/// Event topic0 (keccak256 of event signature)
-fn market_created_topic() -> H256 {
-    H256::from_str("0x525ad00586a161c11070e5c5de95323165a78ae0137615b2f698ba5a527d458b").unwrap()
-}
-fn order_filled_topic() -> H256 {
-    H256::from_str("0xca339ebcfccd32204847ddc1f4b16f9abff9074ac268024a6f72449545ecc218").unwrap()
-}
-fn market_resolved_topic() -> H256 {
-    H256::from_str("0x739f283563fb51ab6b89ee95d937b2e63a6cfcb83c385dbebb629f9d97bd43e6").unwrap()
-}
-fn market_cancelled_topic() -> H256 {
-    H256::from_str("0x2ca440fb7fca85d7f55d395a4abd94817330b83a62f3502efbb4770144e4ca97").unwrap()
-}
-fn winnings_redeemed_topic() -> H256 {
-    H256::from_str("0xa5b5f999d356bb14d51114327e0f0eefeed3a4083169d023dd7fe6744ca15174").unwrap()
-}
+/// Event topic0 constants (keccak256 of event signature).
+/// Using const byte arrays to avoid runtime unwrap/parse.
+const MARKET_CREATED_TOPIC: H256 = H256([
+    0x52, 0x5a, 0xd0, 0x05, 0x86, 0xa1, 0x61, 0xc1, 0x10, 0x70, 0xe5, 0xc5, 0xde, 0x95, 0x32,
+    0x31, 0x65, 0xa7, 0x8a, 0xe0, 0x13, 0x76, 0x15, 0xb2, 0xf6, 0x98, 0xba, 0x5a, 0x52, 0x7d,
+    0x45, 0x8b,
+]);
+const ORDER_FILLED_TOPIC: H256 = H256([
+    0xca, 0x33, 0x9e, 0xbc, 0xfc, 0xcd, 0x32, 0x20, 0x48, 0x47, 0xdd, 0xc1, 0xf4, 0xb1, 0x6f,
+    0x9a, 0xbf, 0xf9, 0x07, 0x4a, 0xc2, 0x68, 0x02, 0x4a, 0x6f, 0x72, 0x44, 0x95, 0x45, 0xec,
+    0xc2, 0x18,
+]);
+const MARKET_RESOLVED_TOPIC: H256 = H256([
+    0x73, 0x9f, 0x28, 0x35, 0x63, 0xfb, 0x51, 0xab, 0x6b, 0x89, 0xee, 0x95, 0xd9, 0x37, 0xb2,
+    0xe6, 0x3a, 0x6c, 0xfc, 0xb8, 0x3c, 0x38, 0x5d, 0xbe, 0xbb, 0x62, 0x9f, 0x9d, 0x97, 0xbd,
+    0x43, 0xe6,
+]);
+const MARKET_CANCELLED_TOPIC: H256 = H256([
+    0x2c, 0xa4, 0x40, 0xfb, 0x7f, 0xca, 0x85, 0xd7, 0xf5, 0x5d, 0x39, 0x5a, 0x4a, 0xbd, 0x94,
+    0x81, 0x73, 0x30, 0xb8, 0x3a, 0x62, 0xf3, 0x50, 0x2e, 0xfb, 0xb4, 0x77, 0x01, 0x44, 0xe4,
+    0xca, 0x97,
+]);
+const WINNINGS_REDEEMED_TOPIC: H256 = H256([
+    0xa5, 0xb5, 0xf9, 0x99, 0xd3, 0x56, 0xbb, 0x14, 0xd5, 0x11, 0x14, 0x32, 0x7e, 0x0f, 0x0e,
+    0xef, 0xee, 0xd3, 0xa4, 0x08, 0x31, 0x69, 0xd0, 0x23, 0xdd, 0x7f, 0xe6, 0x74, 0x4c, 0xa1,
+    0x51, 0x74,
+]);
 
 fn format_address(a: Address) -> String {
     format!("{:?}", a).to_lowercase()
@@ -38,15 +48,15 @@ fn format_tx_hash(h: Option<H256>) -> String {
 pub async fn process_log(pool: &PgPool, log: &Log) -> Result<()> {
     let topic0 = log.topics.get(0).copied().unwrap_or_default();
 
-    if topic0 == market_created_topic() {
+    if topic0 == MARKET_CREATED_TOPIC {
         process_market_created(pool, log).await?;
-    } else if topic0 == order_filled_topic() {
+    } else if topic0 == ORDER_FILLED_TOPIC {
         process_order_filled(pool, log).await?;
-    } else if topic0 == market_resolved_topic() {
+    } else if topic0 == MARKET_RESOLVED_TOPIC {
         process_market_resolved(pool, log).await?;
-    } else if topic0 == market_cancelled_topic() {
+    } else if topic0 == MARKET_CANCELLED_TOPIC {
         process_market_cancelled(pool, log).await?;
-    } else if topic0 == winnings_redeemed_topic() {
+    } else if topic0 == WINNINGS_REDEEMED_TOPIC {
         process_winnings_redeemed(pool, log).await?;
     }
 
@@ -323,6 +333,9 @@ async fn process_winnings_redeemed(pool: &PgPool, log: &Log) -> Result<()> {
     };
 
     let tx_hash = format_tx_hash(log.transaction_hash);
+    let market_id_i32 = market_id.as_u64() as i32;
+    let user_addr = format_address(user);
+    let amount_i64 = amount as i64;
 
     // Track redemption in the trades table as a "REDEEM" entry
     let _ = sqlx::query(
@@ -332,18 +345,47 @@ async fn process_winnings_redeemed(pool: &PgPool, log: &Log) -> Result<()> {
         ON CONFLICT (tx_hash, market_id, buyer_address, token) DO NOTHING
         "#,
     )
-    .bind(market_id.as_u64() as i32)
-    .bind(format_address(user))
-    .bind(amount as i64)
+    .bind(market_id_i32)
+    .bind(&user_addr)
+    .bind(amount_i64)
     .bind(&tx_hash)
     .bind(log.block_number.map(|b| b.as_u64() as i64))
     .execute(pool)
     .await;
 
+    // Deduct redeemed shares from user_positions.
+    // Determine winning token from market outcome.
+    let winning_token: Option<String> = sqlx::query_scalar(
+        "SELECT outcome FROM markets WHERE market_id = $1",
+    )
+    .bind(market_id_i32)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some(token) = winning_token {
+        let _ = sqlx::query(
+            r#"
+            UPDATE user_positions
+            SET shares = GREATEST(shares - $1, 0),
+                cost   = GREATEST(cost - $1, 0),
+                updated_at = NOW()
+            WHERE user_address = $2 AND market_id = $3 AND token = $4
+            "#,
+        )
+        .bind(amount_i64)
+        .bind(&user_addr)
+        .bind(market_id_i32)
+        .bind(&token)
+        .execute(pool)
+        .await;
+    }
+
     tracing::info!(
         "WinningsRedeemed: market_id={} user={} amount={}",
         market_id,
-        format_address(user),
+        user_addr,
         amount
     );
     Ok(())

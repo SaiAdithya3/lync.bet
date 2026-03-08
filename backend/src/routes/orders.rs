@@ -7,12 +7,13 @@ use serde::Deserialize;
 
 use crate::error::AppError;
 use crate::services::AppState;
-use crate::types::{OrderRequest, SubmitOrderRequest};
+use crate::types::{BatchFillRequest, OrderRequest, SubmitOrderRequest};
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/quote", post(quote))
         .route("/", post(submit_order))
+        .route("/batch", post(batch_fill))
         .route("/:market_id", get(get_orderbook))
         .route("/user/:address", get(get_user_orders))
         .route("/:order_id/cancel", delete(cancel_order))
@@ -119,6 +120,100 @@ async fn submit_order(
         resp["txHash"] = serde_json::Value::String(tx);
     }
     Ok(Json(resp))
+}
+
+/// POST /api/orders/batch
+/// Fill multiple pending orders in a single on-chain transaction for gas savings.
+async fn batch_fill(
+    State(state): State<AppState>,
+    Json(req): Json<BatchFillRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if req.order_ids.is_empty() {
+        return Err(AppError::BadRequest("order_ids cannot be empty".into()));
+    }
+    if req.order_ids.len() > 20 {
+        return Err(AppError::BadRequest("Maximum 20 orders per batch".into()));
+    }
+
+    // Fetch all pending orders by ID
+    let placeholders: Vec<String> = (1..=req.order_ids.len())
+        .map(|i| format!("${}", i))
+        .collect();
+    let query_str = format!(
+        "SELECT id, market_id, user_address, token, shares, cost, nonce, deadline, signature \
+         FROM orders WHERE id IN ({}) AND status = 'pending'",
+        placeholders.join(", ")
+    );
+
+    let mut query = sqlx::query_as::<_, BatchOrderRow>(&query_str);
+    for id in &req.order_ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(&state.db).await.map_err(AppError::Db)?;
+
+    if rows.is_empty() {
+        return Err(AppError::BadRequest("No pending orders found for given IDs".into()));
+    }
+
+    let mut contract_orders = Vec::with_capacity(rows.len());
+    let mut signatures = Vec::with_capacity(rows.len());
+
+    for row in &rows {
+        let outcome = if row.token == "YES" { 1u8 } else { 2u8 };
+        let order = state
+            .blockchain
+            .build_order(
+                row.market_id as u64,
+                outcome,
+                &row.user_address,
+                row.shares as u64,
+                row.cost as u64,
+                row.deadline as u64,
+                row.nonce as u64,
+            )
+            .map_err(|e| AppError::InvalidOrder(format!("build_order: {e}")))?;
+        contract_orders.push(order);
+        signatures.push(ethers::types::Bytes::from(row.signature.clone()));
+    }
+
+    let tx_hash = state
+        .blockchain
+        .batch_fill_orders(contract_orders, signatures)
+        .await
+        .map_err(|e| AppError::Blockchain(format!("batchFillOrders tx failed: {e}")))?;
+
+    let tx_hex = format!("{tx_hash:#x}");
+
+    // Update all orders to filled
+    for row in &rows {
+        sqlx::query(
+            "UPDATE orders SET status = 'filled', tx_hash = $1, filled_at = NOW() WHERE id = $2",
+        )
+        .bind(&tx_hex)
+        .bind(row.id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Db)?;
+    }
+
+    Ok(Json(serde_json::json!({
+        "txHash":     tx_hex,
+        "filledCount": rows.len(),
+        "orderIds":   rows.iter().map(|r| r.id).collect::<Vec<_>>()
+    })))
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct BatchOrderRow {
+    id: i32,
+    market_id: i32,
+    user_address: String,
+    token: String,
+    shares: i64,
+    cost: i64,
+    nonce: i64,
+    deadline: i64,
+    signature: Vec<u8>,
 }
 
 /// GET /api/orders/:market_id

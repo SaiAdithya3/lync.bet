@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let database_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+        .map_err(|_| anyhow::anyhow!("DATABASE_URL must be set"))?;
     let pool = DbPool::connect(&database_url).await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;

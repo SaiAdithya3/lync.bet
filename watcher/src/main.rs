@@ -8,8 +8,8 @@ use ethers::middleware::Middleware;
 use ethers::providers::{Http, Provider};
 use ethers::types::{Address, BlockNumber, Filter, Log, U64};
 use std::sync::Arc;
-use tokio::time::{interval, Duration};
-use tracing::{info, instrument};
+use tokio::time::{interval, sleep, Duration};
+use tracing::{info, warn, instrument};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,6 +42,8 @@ async fn main() -> Result<()> {
     let app_state = AppState {
         cursor: cursor.clone(),
         chain_id: config.chain_id,
+        pool: pool.clone(),
+        provider: provider.clone(),
     };
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", config.port)).await?;
     let server = axum::serve(
@@ -85,18 +87,40 @@ async fn main() -> Result<()> {
 struct AppState {
     cursor: Arc<cursor::Cursor>,
     chain_id: u64,
+    pool: sqlx::PgPool,
+    provider: Arc<Provider<Http>>,
 }
 
-async fn health() -> &'static str {
-    "ok"
+async fn health(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl axum::response::IntoResponse {
+    // Verify database connectivity
+    match sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(_) => (axum::http::StatusCode::OK, "ok"),
+        Err(_) => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "db unreachable"),
+    }
 }
 
 async fn status(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> impl axum::response::IntoResponse {
+    let last_block = state.cursor.get();
+    let current_block = state
+        .provider
+        .get_block_number()
+        .await
+        .map(|b| b.as_u64())
+        .unwrap_or(0);
+    let blocks_behind = current_block.saturating_sub(last_block);
+
     axum::Json(serde_json::json!({
         "chain_id": state.chain_id,
-        "last_block": state.cursor.get(),
+        "last_block": last_block,
+        "current_block": current_block,
+        "blocks_behind": blocks_behind,
     }))
 }
 
@@ -112,21 +136,47 @@ async fn run_watcher(
 ) -> Result<()> {
     let mut from_block = cursor.get();
     if from_block == 0 {
-        let current = provider.get_block_number().await?.as_u64();
+        // Bootstrap: retry getting current block with backoff
+        let current = retry_get_block_number(&provider).await?;
         from_block = current.saturating_sub(1000);
+        // Persist bootstrap block so restarts don't re-bootstrap
+        cursor.set(from_block).await?;
         info!("Bootstrap: starting from block {}", from_block);
     }
 
     let mut ticker = interval(Duration::from_millis(poll_interval_ms));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Consecutive RPC failure counter for exponential backoff
+    let mut consecutive_failures: u32 = 0;
+    const MAX_BACKOFF_SECS: u64 = 60;
+
     loop {
         ticker.tick().await;
 
-        let current = provider.get_block_number().await?.as_u64();
+        // If we had recent failures, apply exponential backoff
+        if consecutive_failures > 0 {
+            let backoff_secs = (2u64.pow(consecutive_failures.min(6))).min(MAX_BACKOFF_SECS);
+            warn!(
+                consecutive_failures,
+                backoff_secs, "Backing off before retry"
+            );
+            sleep(Duration::from_secs(backoff_secs)).await;
+        }
+
+        // Handle get_block_number failure gracefully instead of crashing
+        let current = match provider.get_block_number().await {
+            Ok(n) => n.as_u64(),
+            Err(e) => {
+                consecutive_failures += 1;
+                tracing::error!("get_block_number failed (attempt {}): {}", consecutive_failures, e);
+                continue;
+            }
+        };
         let to_block = (from_block + batch_size).min(current);
 
         if from_block > to_block {
+            consecutive_failures = 0; // RPC is healthy, reset counter
             continue;
         }
 
@@ -137,6 +187,7 @@ async fn run_watcher(
 
         match provider.get_logs(&filter).await {
             Ok(logs) => {
+                consecutive_failures = 0; // Reset on success
                 let logs: Vec<Log> = logs;
                 let count = logs.len();
                 for log in &logs {
@@ -156,7 +207,38 @@ async fn run_watcher(
                 from_block = to_block + 1;
             }
             Err(e) => {
-                tracing::error!(from_block, to_block, "get_logs failed: {}", e);
+                consecutive_failures += 1;
+                tracing::error!(
+                    from_block,
+                    to_block,
+                    attempt = consecutive_failures,
+                    "get_logs failed: {}",
+                    e
+                );
+                // Do NOT advance from_block — retry the same range next iteration
+            }
+        }
+    }
+}
+
+/// Retry get_block_number with exponential backoff (for bootstrap).
+async fn retry_get_block_number(provider: &Provider<Http>) -> Result<u64> {
+    let mut attempts = 0u32;
+    loop {
+        match provider.get_block_number().await {
+            Ok(n) => return Ok(n.as_u64()),
+            Err(e) => {
+                attempts += 1;
+                if attempts >= 10 {
+                    return Err(anyhow::anyhow!(
+                        "Failed to get block number after {} attempts: {}",
+                        attempts,
+                        e
+                    ));
+                }
+                let backoff = Duration::from_secs(2u64.pow(attempts.min(5)));
+                warn!("get_block_number failed (attempt {}), retrying in {:?}: {}", attempts, backoff, e);
+                sleep(backoff).await;
             }
         }
     }
