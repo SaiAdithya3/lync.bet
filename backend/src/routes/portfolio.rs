@@ -11,6 +11,7 @@ use crate::services::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/:address", get(get_portfolio))
+        .route("/:address/balance", get(get_balance))
         .route("/:address/history", get(get_trade_history))
         .route("/:address/redemption-status", get(get_redemption_status))
 }
@@ -123,6 +124,33 @@ async fn get_portfolio(
         "openOrders": open_orders_json,
         "totalCost":  total_cost,
         "totalPnl":   total_pnl
+    })))
+}
+
+/// GET /api/portfolio/:address/balance
+/// ETH and USDC balances for the address (from chain).
+async fn get_balance(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let address = address.to_lowercase();
+
+    let usdc_address = std::env::var("MOCK_USDC_ADDRESS")
+        .unwrap_or_else(|_| "0x805593711EdBd2F846035c654e0bF9C7A21dD907".into());
+
+    let (eth_balance, usdc_balance) = tokio::try_join!(
+        state.blockchain.get_eth_balance(&address),
+        state.blockchain.get_erc20_balance(&usdc_address, &address),
+    )
+    .map_err(|e| AppError::Blockchain(format!("balance fetch: {e}")))?;
+
+    // ETH: 18 decimals, USDC: 6 decimals
+    Ok(Json(serde_json::json!({
+        "address": address,
+        "eth": eth_balance.to_string(),
+        "usdc": usdc_balance.to_string(),
+        "ethFormatted": (eth_balance.as_u128() as f64) / 1e18,
+        "usdcFormatted": (usdc_balance.as_u128() as f64) / 1e6
     })))
 }
 

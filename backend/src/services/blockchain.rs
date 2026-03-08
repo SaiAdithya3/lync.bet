@@ -26,6 +26,11 @@ fn nonces_selector() -> [u8; 4] {
     selector("nonces(address)")
 }
 
+/// ABI-encoded function selector for `balanceOf(address)`.
+fn balance_of_selector() -> [u8; 4] {
+    keccak256("balanceOf(address)")[..4].try_into().unwrap()
+}
+
 /// ABI-encoded function selector for `createMarket(bytes32,uint256)`.
 fn create_market_selector() -> [u8; 4] {
     selector("createMarket(bytes32,uint256)")
@@ -157,6 +162,35 @@ impl BlockchainService {
 
     pub fn chain_id(&self) -> u64 {
         self.chain_id
+    }
+
+    /// ETH balance (in wei) for an address.
+    pub async fn get_eth_balance(&self, address: &str) -> Result<U256> {
+        let addr: Address = address.parse()?;
+        let balance = self.provider.get_balance(addr, None).await?;
+        Ok(balance)
+    }
+
+    /// ERC-20 balance for a token contract. Returns raw units (e.g. 6 decimals for USDC).
+    pub async fn get_erc20_balance(&self, token_address: &str, owner_address: &str) -> Result<U256> {
+        let token: Address = token_address.parse()?;
+        let owner: Address = owner_address.parse()?;
+
+        let mut calldata = balance_of_selector().to_vec();
+        calldata.extend_from_slice(&encode(&[Token::Address(owner)]));
+
+        let result = self
+            .provider
+            .call(
+                &TransactionRequest::new()
+                    .to(token)
+                    .data(calldata)
+                    .into(),
+                None,
+            )
+            .await?;
+
+        Ok(U256::from_big_endian(&result))
     }
 
     /// On-chain nonce for `user_address` — call `nonces(address)` via eth_call.
