@@ -93,12 +93,19 @@ async fn create_market(
 
     let creator = req.creator_address.to_lowercase();
 
-    // Insert into DB first (watcher will backfill token addresses and tx_hash)
+    // Insert into DB first (watcher will backfill token addresses and tx_hash).
+    // ON CONFLICT handles the race where watcher already inserted this market_id.
     sqlx::query(
         r#"
         INSERT INTO markets
             (market_id, question, question_hash, category, creator_address, resolution_date, status)
         VALUES ($1, $2, $3, $4, $5, to_timestamp($6), 'pending')
+        ON CONFLICT (market_id) DO UPDATE
+        SET question = EXCLUDED.question,
+            question_hash = EXCLUDED.question_hash,
+            category = EXCLUDED.category,
+            creator_address = EXCLUDED.creator_address,
+            resolution_date = EXCLUDED.resolution_date
         "#,
     )
     .bind(next_id)
