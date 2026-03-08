@@ -37,7 +37,8 @@ const COLLATERAL_TOKEN_ABI = [
 
 /**
  * Ensures the user has approved the PredictionMarket contract to spend at least `cost` USDC.
- * Calls collateralToken() on PredictionMarket, checks allowance, and approves if needed.
+ * Calls collateralToken() on PredictionMarket, checks allowance, and approves max if needed.
+ * Uses max uint256 approval so the user only needs to approve once.
  * Call this before submitOrder.
  */
 export async function ensureCollateralApproval(
@@ -65,11 +66,12 @@ export async function ensureCollateralApproval(
     return;
   }
 
+  const maxApproval = 2n ** 256n - 1n;
   const hash = await writeContract(config, {
     address: collateralToken,
     abi: COLLATERAL_TOKEN_ABI,
     functionName: "approve",
-    args: [PREDICTION_MARKET_ADDRESS, cost],
+    args: [PREDICTION_MARKET_ADDRESS, maxApproval],
   });
 
   const publicClient = getPublicClient(config);

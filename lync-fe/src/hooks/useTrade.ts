@@ -3,7 +3,9 @@ import { useAccount, useSignTypedData } from "wagmi";
 import { orderService } from "../services/orderService";
 import { marketService } from "../services/marketService";
 import { useTradeStore } from "../stores/tradeStore";
+import { useToastStore } from "../stores/toastStore";
 import { ensureCollateralApproval } from "../services/approvalService";
+import { consolidateErrorMessage } from "../utils/errorMessage";
 
 export function useTrade(marketId: string | undefined) {
   const { address } = useAccount();
@@ -80,8 +82,11 @@ export function useTrade(marketId: string | undefined) {
         ]);
         setOrderBook(ob);
         setPositions(positions);
+        useToastStore.getState().success("Trade placed successfully.");
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Trade failed");
+        const message = consolidateErrorMessage(e, "Trade failed.");
+        setError(message);
+        useToastStore.getState().error(message, "Trade failed");
         throw e;
       } finally {
         setLoading(false);
