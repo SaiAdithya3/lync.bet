@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
         .route("/trending", get(get_trending_markets))
         .route("/categories", get(get_categories))
         .route("/search", get(search_markets))
+        .route("/ready-to-resolve", get(get_ready_to_resolve))
         .route("/:market_id", get(get_market))
         .route("/:market_id/price", get(get_market_price))
         .route("/:market_id/activity", get(get_market_activity))
@@ -138,6 +139,42 @@ async fn create_market(
         "txHash":         tx_hex,
         "status":         "open"
     })))
+}
+
+/// GET /api/markets/ready-to-resolve
+/// Returns the oldest open market whose resolution_date has passed.
+/// Used by the CRE workflow to discover which market to resolve next.
+async fn get_ready_to_resolve(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let market: Option<MarketRow> = sqlx::query_as(
+        r#"
+        SELECT market_id, question, category, creator_address,
+               yes_token_address, no_token_address, resolution_date,
+               status, outcome, created_at
+        FROM markets
+        WHERE status = 'open' AND resolution_date <= NOW()
+        ORDER BY resolution_date ASC
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    match market {
+        Some(m) => Ok(Json(serde_json::json!({
+            "marketId":        m.market_id,
+            "question":        m.question,
+            "category":        m.category,
+            "creatorAddress":  m.creator_address,
+            "resolutionDate":  m.resolution_date,
+            "status":          m.status,
+        }))),
+        None => Ok(Json(serde_json::json!({
+            "market": null
+        }))),
+    }
 }
 
 /// GET /api/markets

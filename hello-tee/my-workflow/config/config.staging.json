@@ -1,8 +1,6 @@
 {
   "schedule": "* * * * *",
-  "inputData": "Polymarket:Will-BTC-hit-100k-by-2025-12-31",
-  "apiUrl": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+  "backendUrl": "http://localhost:3001",
   "predictionMarketAddress": "0x45e7911Af8c31bDeDf8A586BeEd8efEcACEb9c37",
-  "marketId": "0",
   "chainSelectorName": "ethereum-testnet-sepolia"
 }

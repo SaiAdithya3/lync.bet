@@ -15886,10 +15886,8 @@ init_exports();
 init_encodeAbiParameters();
 var configSchema = exports_external.object({
   schedule: exports_external.string(),
-  inputData: exports_external.string(),
-  apiUrl: exports_external.string(),
+  backendUrl: exports_external.string(),
   predictionMarketAddress: exports_external.string(),
-  marketId: exports_external.string(),
   chainSelectorName: exports_external.string()
 });
 function deterministicHash(str) {
@@ -15908,23 +15906,46 @@ function deterministicHash(str) {
   return combined.toString(16).padStart(16, "0");
 }
 var fetchMarketData = (sendRequester, config) => {
+  const url = `${config.backendUrl}/api/markets/ready-to-resolve`;
   const response = sendRequester.sendRequest({
-    url: config.apiUrl,
+    url,
+    method: "GET"
+  }).result();
+  if (!ok(response)) {
+    throw new Error(`Backend returned ${response.statusCode} for ready-to-resolve`);
+  }
+  return new TextDecoder().decode(response.body);
+};
+var fetchEvidence = (sendRequester, config) => {
+  const response = sendRequester.sendRequest({
+    url: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
     method: "GET"
   }).result();
   return new TextDecoder().decode(response.body);
 };
-var callLLM = (nodeRuntime, apiKey) => {
+var callLLM = (nodeRuntime, apiKey, question, evidence) => {
+  const today = new Date().toISOString().split("T")[0];
   const bodyObj = {
     contents: [
       {
         parts: [
           {
-            text: `You are a prediction market resolver. Determine the outcome.
+            text: `You are a prediction market resolver. Your job is to determine whether the outcome of a market question is YES or NO based on the evidence provided.
 
-Question: ${nodeRuntime.config.inputData}
+Market Question: ${question}
 
-Respond ONLY with JSON: {"outcome": "YES", "confidence": 0.95, "reasoning": "one sentence"}`
+Live Evidence Data: ${evidence}
+
+Today's Date: ${today}
+
+Rules:
+- Answer based ONLY on the evidence provided and your knowledge up to today's date
+- If the evidence clearly supports one outcome, state it with high confidence
+- If the evidence is insufficient or ambiguous, state the more likely outcome with lower confidence
+- Do NOT hedge — you must pick YES or NO
+
+Respond ONLY with this exact JSON format. No markdown, no backticks, nothing else:
+{"outcome": "YES", "confidence": 0.95, "reasoning": "one sentence"}`
           }
         ]
       }
@@ -15949,7 +15970,7 @@ Respond ONLY with JSON: {"outcome": "YES", "confidence": 0.95, "reasoning": "one
   nodeRuntime.log(`[LLM] Status: ${resp.statusCode}`);
   const responseBody = new TextDecoder().decode(resp.body);
   if (!ok(resp)) {
-    throw new Error(`LLM request failed: ${resp.statusCode}`);
+    throw new Error(`LLM request failed: ${resp.statusCode} — ${responseBody}`);
   }
   const parsed = JSON.parse(responseBody);
   return parsed.candidates[0].content.parts[0].text;
@@ -15970,35 +15991,60 @@ function parseOutcome(llmResponse) {
   }
   return 0;
 }
+function extractQuestion(marketDataJson) {
+  const data = JSON.parse(marketDataJson);
+  return {
+    marketId: data.marketId,
+    question: data.question,
+    category: data.category || "general",
+    resolutionDate: data.resolutionDate || "",
+    status: data.status || "open"
+  };
+}
 var onCronTrigger = (runtime2) => {
   runtime2.log("=== Prediction Market Resolution Workflow ===");
-  runtime2.log("[STEP 1] Fetching market data...");
+  runtime2.log("[STEP 1] Checking for markets ready to resolve...");
   const httpClient = new ClientCapability3;
-  const marketData = httpClient.sendRequest(runtime2, fetchMarketData, consensusIdenticalAggregation())(runtime2.config).result();
-  runtime2.log(`[STEP 1] Done: ${marketData}`);
-  runtime2.log("[STEP 2] Calling LLM...");
-  const secret = runtime2.getSecret({ id: "GEMINI_API_KEY" }).result();
-  const llmResponse = runtime2.runInNodeMode(callLLM, consensusIdenticalAggregation())(secret.value).result();
-  runtime2.log(`[STEP 2] LLM says: ${llmResponse}`);
-  const outcome = parseOutcome(llmResponse);
-  const marketId = BigInt(runtime2.config.marketId);
-  runtime2.log(`[STEP 3] Parsed outcome: ${outcome} (1=YES, 2=NO) for market ${marketId}`);
-  if (outcome === 0) {
-    runtime2.log("[STEP 3] Could not determine outcome. Skipping on-chain write.");
-    return JSON.stringify({ status: "unresolved", llmResponse });
+  const marketDataRaw = httpClient.sendRequest(runtime2, fetchMarketData, consensusIdenticalAggregation())(runtime2.config).result();
+  runtime2.log(`[STEP 1] Got response: ${marketDataRaw.substring(0, 200)}...`);
+  const parsed = JSON.parse(marketDataRaw);
+  if (parsed.market === null || !parsed.marketId) {
+    runtime2.log("[STEP 1] No markets ready for resolution. Exiting.");
+    return JSON.stringify({ status: "idle", message: "No markets ready for resolution" });
   }
-  runtime2.log("[STEP 4] Encoding report...");
+  const marketData = extractQuestion(marketDataRaw);
+  runtime2.log(`[STEP 1] Resolving market ${marketData.marketId}: "${marketData.question}"`);
+  runtime2.log(`[STEP 1] Category: ${marketData.category}, Status: ${marketData.status}`);
+  runtime2.log("[STEP 2] Fetching live evidence...");
+  const evidence = httpClient.sendRequest(runtime2, fetchEvidence, consensusIdenticalAggregation())(runtime2.config).result();
+  runtime2.log(`[STEP 2] Evidence: ${evidence}`);
+  runtime2.log("[STEP 3] Calling LLM for resolution...");
+  const secret = runtime2.getSecret({ id: "GEMINI_API_KEY" }).result();
+  const llmResponse = runtime2.runInNodeMode(callLLM, consensusIdenticalAggregation())(secret.value, marketData.question, evidence).result();
+  runtime2.log(`[STEP 3] LLM says: ${llmResponse}`);
+  const outcome = parseOutcome(llmResponse);
+  const marketId = BigInt(marketData.marketId);
+  runtime2.log(`[STEP 4] Parsed outcome: ${outcome} (1=YES, 2=NO) for market ${marketId}`);
+  if (outcome === 0) {
+    runtime2.log("[STEP 4] Could not determine outcome. Skipping on-chain write.");
+    return JSON.stringify({
+      marketId: marketData.marketId,
+      status: "unresolved",
+      llmResponse
+    });
+  }
+  runtime2.log("[STEP 5] Encoding report...");
   const encodedPayload = encodeAbiParameters(parseAbiParameters("uint256 marketId, uint8 outcome"), [marketId, outcome]);
-  runtime2.log(`[STEP 4] Encoded: ${encodedPayload}`);
-  runtime2.log("[STEP 5] Generating signed report...");
+  runtime2.log(`[STEP 5] Encoded: ${encodedPayload}`);
+  runtime2.log("[STEP 6] Generating signed report...");
   const reportResponse = runtime2.report({
     encodedPayload: hexToBase64(encodedPayload),
     encoderName: "evm",
     signingAlgo: "ecdsa",
     hashingAlgo: "keccak256"
   }).result();
-  runtime2.log("[STEP 5] Report signed by DON");
-  runtime2.log("[STEP 6] Writing to chain...");
+  runtime2.log("[STEP 6] Report signed by DON");
+  runtime2.log("[STEP 7] Writing to chain...");
   const network248 = getNetwork({
     chainFamily: "evm",
     chainSelectorName: runtime2.config.chainSelectorName,
@@ -16014,12 +16060,13 @@ var onCronTrigger = (runtime2) => {
     gasConfig: { gasLimit: "500000" }
   }).result();
   const txHash = bytesToHex(writeResult.txHash || new Uint8Array(32));
-  runtime2.log(`[STEP 6] TX submitted: ${txHash}`);
+  runtime2.log(`[STEP 7] TX submitted: ${txHash}`);
   const result = {
-    marketId: runtime2.config.marketId,
+    marketId: marketData.marketId,
+    question: marketData.question,
     outcome: outcome === 1 ? "YES" : "NO",
-    confidence: llmResponse,
-    evidenceHash: deterministicHash(marketData),
+    llmResponse,
+    evidenceHash: deterministicHash(evidence),
     txHash
   };
   runtime2.log(`Result: ${JSON.stringify(result)}`);
