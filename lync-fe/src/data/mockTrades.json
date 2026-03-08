@@ -1,0 +1,52 @@
+[
+  {
+    "id": "t1",
+    "marketId": "m1",
+    "side": "YES",
+    "amount": 150,
+    "price": 0.62,
+    "outcome": "YES",
+    "timestamp": "2025-03-07T10:32:00Z",
+    "userId": "u1"
+  },
+  {
+    "id": "t2",
+    "marketId": "m2",
+    "side": "NO",
+    "amount": 200,
+    "price": 0.52,
+    "outcome": "NO",
+    "timestamp": "2025-03-07T10:28:00Z",
+    "userId": "u2"
+  },
+  {
+    "id": "t3",
+    "marketId": "m1",
+    "side": "NO",
+    "amount": 80,
+    "price": 0.38,
+    "outcome": "NO",
+    "timestamp": "2025-03-07T10:25:00Z",
+    "userId": "u3"
+  },
+  {
+    "id": "t4",
+    "marketId": "m3",
+    "side": "YES",
+    "amount": 320,
+    "price": 0.71,
+    "outcome": "YES",
+    "timestamp": "2025-03-07T10:20:00Z",
+    "userId": "u1"
+  },
+  {
+    "id": "t5",
+    "marketId": "m4",
+    "side": "YES",
+    "amount": 95,
+    "price": 0.55,
+    "outcome": "YES",
+    "timestamp": "2025-03-07T10:15:00Z",
+    "userId": "u4"
+  }
+]

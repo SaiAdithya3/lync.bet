@@ -1,0 +1,9 @@
+[
+  { "id": "a1", "marketTitle": "Bitcoin $100k by 2025", "side": "YES", "amount": 150, "price": 62, "time": "2m ago" },
+  { "id": "a2", "marketTitle": "Fed rate cut March 2025", "side": "NO", "amount": 200, "price": 52, "time": "5m ago" },
+  { "id": "a3", "marketTitle": "Bitcoin $100k by 2025", "side": "NO", "amount": 80, "price": 38, "time": "8m ago" },
+  { "id": "a4", "marketTitle": "OpenAI GPT-5 in 2025", "side": "YES", "amount": 320, "price": 71, "time": "12m ago" },
+  { "id": "a5", "marketTitle": "Tesla 2M vehicles 2025", "side": "YES", "amount": 95, "price": 55, "time": "15m ago" },
+  { "id": "a6", "marketTitle": "NYC Christmas snow 2025", "side": "NO", "amount": 45, "price": 72, "time": "18m ago" },
+  { "id": "a7", "marketTitle": "Ethereum full PoS Q2 2025", "side": "YES", "amount": 210, "price": 89, "time": "22m ago" }
+]
