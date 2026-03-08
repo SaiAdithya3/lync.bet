@@ -1,5 +1,6 @@
 # Chainlink-hackathon
-<img width="1000" height="500" alt="Rectangle 2" src="https://github.com/user-attachments/assets/730b523a-50d9-4431-b12d-2785bd1d4cf2" />
+<img width="1000" height="500" alt="Group 1 (1)" src="https://github.com/user-attachments/assets/6db3e759-ba98-45cb-b3c1-ac5699a1ff67" />
+
 
 ## Local Development Setup
 
