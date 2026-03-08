@@ -1,11 +1,15 @@
 import { type ReactNode } from "react";
 import { Navbar } from "./Navbar";
+import { useMarkets } from "../../hooks/useMarkets";
+import { useWagmiSync } from "../../hooks/useWagmiSync";
 
 interface AppLayoutProps {
   children: ReactNode;
 }
 
 export function AppLayout({ children }: AppLayoutProps) {
+  useMarkets();
+  useWagmiSync();
   return (
     <div className="min-h-screen bg-neutral-bg app-grid">
       <Navbar />

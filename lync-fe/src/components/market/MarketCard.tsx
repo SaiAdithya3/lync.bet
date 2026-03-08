@@ -6,6 +6,7 @@ import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
 import { ProbabilityBar } from "./ProbabilityBar";
 import { useUIStore } from "../../stores/uiStore";
+import { useMarketStore } from "../../stores/marketStore";
 
 interface MarketCardProps {
   market: Market;
@@ -13,10 +14,12 @@ interface MarketCardProps {
 
 export function MarketCard({ market }: MarketCardProps) {
   const { setOpenModal } = useUIStore();
+  const { setSelectedMarket } = useMarketStore();
 
   const handleTrade = (e: React.MouseEvent, _side: "YES" | "NO") => {
     e.preventDefault();
     e.stopPropagation();
+    setSelectedMarket(market.id);
     setOpenModal("trade");
   };
 

@@ -1,12 +1,13 @@
 import { useEffect } from "react";
+import { useAccount } from "wagmi";
 import { useTradeStore } from "../stores/tradeStore";
 import { marketService } from "../services/marketService";
 
 export function usePositions() {
   const setPositions = useTradeStore((s) => s.setPositions);
+  const { address } = useAccount();
 
   useEffect(() => {
-    const positions = marketService.getPositions();
-    setPositions(positions);
-  }, [setPositions]);
+    marketService.getPositions(address ?? null).then(setPositions);
+  }, [address, setPositions]);
 }

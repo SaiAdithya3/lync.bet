@@ -7,7 +7,6 @@ export function useOrderBook(marketId: string | undefined) {
 
   useEffect(() => {
     if (!marketId) return;
-    const entries = marketService.getOrderBook(marketId);
-    setOrderBook(entries);
+    marketService.getOrderBook(marketId).then(setOrderBook);
   }, [marketId, setOrderBook]);
 }

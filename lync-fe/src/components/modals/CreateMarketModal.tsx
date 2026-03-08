@@ -3,17 +3,24 @@ import { Modal } from "../ui/Modal";
 import { Input } from "../ui/Input";
 import { Button } from "../ui/Button";
 import { useUIStore } from "../../stores/uiStore";
+import { useAccount } from "wagmi";
+import { useMarketStore } from "../../stores/marketStore";
+import { marketService } from "../../services/marketService";
 
 type OutcomeRow = { id: string; label: string; resolutionDate: string };
 
 export function CreateMarketModal() {
   const { openModal, setOpenModal } = useUIStore();
+  const { address, isConnected } = useAccount();
+  const { addMarket } = useMarketStore();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState("Other");
   const [resolutionDate, setResolutionDate] = useState("");
   const [resolutionTime, setResolutionTime] = useState("23:59");
   const [outcomes, setOutcomes] = useState<OutcomeRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const isOpen = openModal === "createMarket";
   const isMultiOutcome = outcomes.length > 0;
@@ -35,15 +42,60 @@ export function CreateMarketModal() {
     setOutcomes((prev) => prev.filter((o) => o.id !== id));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setTitle("");
-    setDescription("");
-    setCategory("Other");
-    setResolutionDate("");
-    setResolutionTime("23:59");
-    setOutcomes([]);
-    setOpenModal(null);
+    setError(null);
+    if (!isConnected || !address) {
+      setError("Connect your wallet to create a market");
+      return;
+    }
+
+    const resDate = isMultiOutcome
+      ? outcomes[0]?.resolutionDate
+      : resolutionDate;
+    if (!resDate) {
+      setError("Resolution date is required");
+      return;
+    }
+
+    const question = outcomes.length > 0
+      ? `${title} — ${outcomes.map((o) => o.label).join(", ")}`
+      : title;
+    const resolutionDateStr = `${resDate}T${resolutionTime}:00.000Z`;
+
+    setLoading(true);
+    try {
+      const { marketId } = await marketService.createMarket({
+        question,
+        category,
+        resolutionDate: resolutionDateStr,
+        creatorAddress: address,
+      });
+      addMarket({
+        id: String(marketId),
+        title: question,
+        description: description || "",
+        yesProbability: 0.5,
+        noProbability: 0.5,
+        volume: 0,
+        liquidity: 0,
+        participants: 0,
+        endDate: resolutionDateStr,
+        category,
+        createdAt: new Date().toISOString(),
+      });
+      setTitle("");
+      setDescription("");
+      setCategory("Other");
+      setResolutionDate("");
+      setResolutionTime("23:59");
+      setOutcomes([]);
+      setOpenModal(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create market");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -175,8 +227,11 @@ export function CreateMarketModal() {
             <option value="Other">Other</option>
           </select>
         </div>
-        <Button type="submit" variant="primary" fullWidth>
-          Create market
+        {error && (
+          <p className="text-sm text-red-400">{error}</p>
+        )}
+        <Button type="submit" variant="primary" fullWidth disabled={loading}>
+          {loading ? "Creating..." : "Create market"}
         </Button>
       </form>
     </Modal>

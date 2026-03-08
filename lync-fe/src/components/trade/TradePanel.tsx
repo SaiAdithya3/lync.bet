@@ -10,24 +10,33 @@ import { Card } from "../ui/Card";
 interface TradePanelProps {
   yesProbability: number;
   noProbability: number;
-  onTrade?: (side: TradeSide, amount: number, price: number) => void;
+  onTrade?: (side: TradeSide, amount: number) => void | Promise<void>;
+  loading?: boolean;
+  error?: string | null;
 }
 
 export function TradePanel({
   yesProbability,
   noProbability,
   onTrade,
+  loading = false,
+  error,
 }: TradePanelProps) {
   const [side, setSide] = useState<TradeSide>("YES");
   const [amount, setAmount] = useState("");
   const price = side === "YES" ? yesProbability : noProbability;
   const amountNum = parseFloat(amount) || 0;
-  const potentialReturn = amountNum > 0 ? amountNum : undefined;
+  // amountNum = USD to spend; potential return = shares (1 winning share = $1)
+  const potentialReturn = amountNum > 0 && price > 0 ? amountNum / price : undefined;
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (amountNum <= 0) return;
-    onTrade?.(side, amountNum, price);
-    setAmount("");
+    try {
+      await onTrade?.(side, amountNum);
+      setAmount("");
+    } catch {
+      // Error handled by parent
+    }
   };
 
   return (
@@ -51,12 +60,19 @@ export function TradePanel({
           potentialReturn={potentialReturn}
         />
       </div>
+      {error && (
+        <p className="mt-2 text-sm text-red-400">{error}</p>
+      )}
+      <p className="mt-2 text-xs text-muted-foreground">
+        Orders use USDC. Ensure you have USDC on Sepolia and have approved the market contract to spend it.
+      </p>
       <div className="mt-4">
         <SubmitTradeButton
           side={side}
           amount={amountNum}
           priceCents={formatPriceCents(price)}
           onClick={handleSubmit}
+          loading={loading}
         />
       </div>
     </Card>

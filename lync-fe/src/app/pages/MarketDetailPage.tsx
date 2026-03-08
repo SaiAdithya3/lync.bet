@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { useMarket } from "../../hooks/useMarket";
+import { useMarketStore } from "../../stores/marketStore";
+import { marketService } from "../../services/marketService";
 import { useChartData } from "../../hooks/useChartData";
 import { useOrderBook } from "../../hooks/useOrderBook";
 import { usePositions } from "../../hooks/usePositions";
+import { useTrade } from "../../hooks/useTrade";
 import { useTradeStore } from "../../stores/tradeStore";
-import { useMarketStore } from "../../stores/marketStore";
 import { useUIStore } from "../../stores/uiStore";
 import { MarketHeader } from "../../components/market/MarketHeader";
 import { ProbabilityChart } from "../../components/charts/ProbabilityChart";
@@ -19,11 +21,18 @@ import type { MarketOutcome } from "../../types/market";
 export function MarketDetailPage() {
   const { id } = useParams<{ id: string }>();
   const market = useMarket(id);
+  const { addMarket, setSelectedMarket } = useMarketStore();
+
+  useEffect(() => {
+    if (!id || market) return;
+    marketService.getMarketById(id).then((m) => m && addMarket(m));
+  }, [id, market, addMarket]);
+
   useChartData(id);
   useOrderBook(id);
   usePositions();
+  const { executeTrade, loading: tradeLoading, error: tradeError } = useTrade(id);
   const { orderBook, positions } = useTradeStore();
-  const { setSelectedMarket } = useMarketStore();
   const { setOpenModal, setTradeOutcomeId } = useUIStore();
 
   const outcomes = market?.outcomes ?? [];
@@ -91,6 +100,9 @@ export function MarketDetailPage() {
                   <TradePanel
                     yesProbability={selectedOutcome.yesProbability}
                     noProbability={selectedOutcome.noProbability}
+                    onTrade={executeTrade}
+                    loading={tradeLoading}
+                    error={tradeError}
                   />
                 </>
               )}
@@ -117,7 +129,13 @@ export function MarketDetailPage() {
             <ProbabilityChart height={320} className="px-4 pb-4" />
           </Card>
           <div className="block lg:hidden">
-            <TradePanel yesProbability={yesProbability} noProbability={noProbability} />
+            <TradePanel
+              yesProbability={yesProbability}
+              noProbability={noProbability}
+              onTrade={executeTrade}
+              loading={tradeLoading}
+              error={tradeError}
+            />
           </div>
           <Card className="border-border/60 bg-card" padding="lg">
             <PositionTable positions={marketPositions} />
@@ -125,7 +143,13 @@ export function MarketDetailPage() {
         </div>
         <div className="space-y-6">
           <div className="hidden lg:block">
-            <TradePanel yesProbability={yesProbability} noProbability={noProbability} />
+            <TradePanel
+              yesProbability={yesProbability}
+              noProbability={noProbability}
+              onTrade={executeTrade}
+              loading={tradeLoading}
+              error={tradeError}
+            />
           </div>
           <Card className="border-border/60 bg-card" padding="lg">
             <OrderBook bids={bids} asks={asks} />
