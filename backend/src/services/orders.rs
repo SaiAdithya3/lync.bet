@@ -204,7 +204,34 @@ impl OrderService {
                 orderbook
                     .record_price_snapshot(market_id, price, token, cost)
                     .await
-                    .ok(); // non-fatal if snapshot fails
+                    .ok();
+
+                // Optimistically upsert user position (watcher will confirm)
+                let avg_p = if shares > 0 { ((cost * 100) / shares).clamp(1, 99) as i32 } else { 50 };
+                sqlx::query(
+                    r#"
+                    INSERT INTO user_positions (user_address, market_id, token, shares, cost, avg_price)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (user_address, market_id, token) DO UPDATE
+                    SET shares = user_positions.shares + $4,
+                        cost   = user_positions.cost + $5,
+                        avg_price = CASE
+                            WHEN (user_positions.shares + $4) > 0
+                            THEN (((user_positions.cost + $5) * 100) / (user_positions.shares + $4))::int
+                            ELSE 50
+                        END,
+                        updated_at = NOW()
+                    "#,
+                )
+                .bind(&user_address_lower)
+                .bind(market_id)
+                .bind(token.to_uppercase())
+                .bind(shares)
+                .bind(cost)
+                .bind(avg_p)
+                .execute(&self.db)
+                .await
+                .ok(); // non-fatal
 
                 Some(tx_hex)
             }

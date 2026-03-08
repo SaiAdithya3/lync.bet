@@ -3,10 +3,12 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use ethers::utils::keccak256;
 use serde::Deserialize;
 
 use crate::error::AppError;
 use crate::services::AppState;
+use crate::types::CreateMarketRequest;
 
 #[derive(Debug, Deserialize)]
 pub struct MarketsQuery {
@@ -25,9 +27,116 @@ fn default_limit() -> i64 {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/", get(list_markets))
+        .route("/", get(list_markets).post(create_market))
+        .route("/trending", get(get_trending_markets))
+        .route("/categories", get(get_categories))
+        .route("/search", get(search_markets))
         .route("/:market_id", get(get_market))
         .route("/:market_id/price", get(get_market_price))
+        .route("/:market_id/activity", get(get_market_activity))
+        .route("/:market_id/positions", get(get_market_positions))
+}
+
+/// POST /api/markets
+/// Anyone can create a market. The backend hashes the question, calls createMarket
+/// on-chain, and stores the human-readable question so the UI shows it instead of the hash.
+async fn create_market(
+    State(state): State<AppState>,
+    Json(req): Json<CreateMarketRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let question = req.question.trim().to_string();
+    if question.is_empty() {
+        return Err(AppError::BadRequest("Question cannot be empty".into()));
+    }
+
+    let question_hash: [u8; 32] = keccak256(question.as_bytes());
+    let question_hash_hex = format!("0x{}", hex::encode(question_hash));
+
+    // Parse resolution date (supports ISO-8601 or unix timestamp)
+    let resolution_ts: i64 = if let Ok(ts) = req.resolution_date.parse::<i64>() {
+        ts
+    } else {
+        chrono::DateTime::parse_from_rfc3339(&req.resolution_date)
+            .map_err(|_| AppError::BadRequest(
+                "resolution_date must be ISO-8601 (e.g. 2026-12-31T23:59:59Z) or unix timestamp".into(),
+            ))?
+            .timestamp()
+    };
+
+    if resolution_ts <= chrono::Utc::now().timestamp() {
+        return Err(AppError::BadRequest("Resolution date must be in the future".into()));
+    }
+
+    // Check if a market with this question hash already exists
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM markets WHERE question_hash = $1)",
+    )
+    .bind(&question_hash[..])
+    .fetch_one(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    if exists {
+        return Err(AppError::SimilarMarketExists(question.clone()));
+    }
+
+    // Determine the next market_id (matches on-chain marketCount)
+    let next_id: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(market_id), -1) + 1 FROM markets",
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    let creator = req.creator_address.to_lowercase();
+
+    // Insert into DB first (watcher will backfill token addresses and tx_hash)
+    sqlx::query(
+        r#"
+        INSERT INTO markets
+            (market_id, question, question_hash, category, creator_address, resolution_date, status)
+        VALUES ($1, $2, $3, $4, $5, to_timestamp($6), 'pending')
+        "#,
+    )
+    .bind(next_id)
+    .bind(&question)
+    .bind(&question_hash[..])
+    .bind(&req.category)
+    .bind(&creator)
+    .bind(resolution_ts as f64)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    // Call createMarket on-chain
+    let tx_hash = state
+        .blockchain
+        .create_market(question_hash, resolution_ts as u64)
+        .await
+        .map_err(|e| AppError::Blockchain(format!("createMarket tx failed: {e}")))?;
+
+    let tx_hex = format!("{tx_hash:#x}");
+
+    // Update DB with tx hash and set status to open
+    sqlx::query(
+        "UPDATE markets SET tx_hash = $1, status = 'open' WHERE market_id = $2",
+    )
+    .bind(&tx_hex)
+    .bind(next_id)
+    .execute(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    Ok(Json(serde_json::json!({
+        "marketId":       next_id,
+        "question":       question,
+        "questionHash":   question_hash_hex,
+        "category":       req.category,
+        "creatorAddress": creator,
+        "resolutionDate": resolution_ts,
+        "txHash":         tx_hex,
+        "status":         "open"
+    })))
 }
 
 /// GET /api/markets
@@ -288,6 +397,232 @@ async fn get_market_price(
     })))
 }
 
+/// GET /api/markets/trending
+/// Markets ranked by 24h volume — the homepage hero section.
+async fn get_trending_markets(
+    State(state): State<AppState>,
+    Query(q): Query<MarketsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let limit = q.limit.min(50);
+
+    let rows: Vec<TrendingRow> = sqlx::query_as(
+        r#"
+        SELECT m.market_id, m.question, m.category,
+               m.resolution_date, m.status, m.created_at,
+               COALESCE(SUM(t.cost), 0)::bigint AS total_volume,
+               COUNT(t.id)::int                 AS trade_count
+        FROM markets m
+        LEFT JOIN trades t ON t.market_id = m.market_id AND t.token IN ('YES','NO')
+        WHERE m.status = 'open'
+        GROUP BY m.market_id, m.question, m.category,
+                 m.resolution_date, m.status, m.created_at
+        ORDER BY total_volume DESC, trade_count DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let ob = state.orderbook.get_orderbook(r.market_id).await;
+        let (yes_price, no_price) = ob.map(|o| (o.yes_price, o.no_price)).unwrap_or((50, 50));
+
+        out.push(serde_json::json!({
+            "marketId":        r.market_id,
+            "question":        r.question,
+            "category":        r.category,
+            "yesPrice":        yes_price,
+            "noPrice":         no_price,
+            "totalVolume":     r.total_volume,
+            "tradeCount":      r.trade_count,
+            "resolutionDate":  r.resolution_date,
+            "status":          r.status,
+            "createdAt":       r.created_at
+        }));
+    }
+
+    Ok(Json(serde_json::json!({ "markets": out })))
+}
+
+/// GET /api/markets/categories
+/// Distinct categories with market counts — for the category filter bar.
+async fn get_categories(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let categories: Vec<CategoryRow> = sqlx::query_as(
+        r#"
+        SELECT category,
+               COUNT(*)::int AS market_count,
+               COUNT(*) FILTER (WHERE status = 'open')::int AS open_count
+        FROM markets
+        GROUP BY category
+        ORDER BY market_count DESC
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    let cats: Vec<_> = categories
+        .iter()
+        .map(|c| serde_json::json!({
+            "category":    c.category,
+            "marketCount": c.market_count,
+            "openCount":   c.open_count
+        }))
+        .collect();
+
+    Ok(Json(serde_json::json!({ "categories": cats })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+}
+
+/// GET /api/markets/search?q=bitcoin&limit=10
+/// Full-text search on market questions.
+async fn search_markets(
+    State(state): State<AppState>,
+    Query(sq): Query<SearchQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let query = sq.q.trim().to_string();
+    if query.is_empty() {
+        return Err(AppError::BadRequest("Search query cannot be empty".into()));
+    }
+    let limit = sq.limit.min(50);
+    let pattern = format!("%{}%", query.to_lowercase());
+
+    let markets: Vec<MarketRow> = sqlx::query_as(
+        r#"
+        SELECT market_id, question, category, creator_address,
+               yes_token_address, no_token_address, resolution_date,
+               status, outcome, created_at
+        FROM markets
+        WHERE LOWER(question) LIKE $1
+        ORDER BY created_at DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(&pattern)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    let mut out = Vec::with_capacity(markets.len());
+    for m in markets {
+        let ob = state.orderbook.get_orderbook(m.market_id).await;
+        let (yes_price, no_price) = ob.map(|o| (o.yes_price, o.no_price)).unwrap_or((50, 50));
+
+        out.push(serde_json::json!({
+            "marketId":       m.market_id,
+            "question":       m.question,
+            "category":       m.category,
+            "yesPrice":       yes_price,
+            "noPrice":        no_price,
+            "resolutionDate": m.resolution_date,
+            "status":         m.status,
+            "outcome":        m.outcome,
+            "createdAt":      m.created_at
+        }));
+    }
+
+    Ok(Json(serde_json::json!({ "markets": out, "query": query })))
+}
+
+/// GET /api/markets/:market_id/activity
+/// Recent activity feed for a single market (trades + key events).
+async fn get_market_activity(
+    State(state): State<AppState>,
+    Path(market_id): Path<i32>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let trades: Vec<ActivityRow> = sqlx::query_as(
+        r#"
+        SELECT buyer_address, token, shares, cost, tx_hash, created_at
+        FROM trades
+        WHERE market_id = $1 AND token IN ('YES', 'NO')
+        ORDER BY created_at DESC
+        LIMIT 50
+        "#,
+    )
+    .bind(market_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    let feed: Vec<_> = trades
+        .iter()
+        .map(|t| {
+            let price_cents = crate::services::orderbook::OrderbookService::shares_to_price_cents(t.cost, t.shares);
+            serde_json::json!({
+                "type":        "trade",
+                "address":     t.buyer_address,
+                "token":       t.token,
+                "shares":      t.shares,
+                "cost":        t.cost,
+                "priceCents":  price_cents,
+                "txHash":      t.tx_hash,
+                "timestamp":   t.created_at
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "marketId": market_id,
+        "activity": feed
+    })))
+}
+
+/// GET /api/markets/:market_id/positions
+/// All user positions for a specific market (how many people hold YES vs NO).
+async fn get_market_positions(
+    State(state): State<AppState>,
+    Path(market_id): Path<i32>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    #[derive(sqlx::FromRow, serde::Serialize)]
+    struct MarketPositionRow {
+        user_address: String,
+        token: String,
+        shares: i64,
+        cost: i64,
+        avg_price: i32,
+    }
+
+    let positions: Vec<MarketPositionRow> = sqlx::query_as(
+        r#"
+        SELECT user_address, token, shares, cost, avg_price
+        FROM user_positions
+        WHERE market_id = $1 AND shares > 0
+        ORDER BY shares DESC
+        "#,
+    )
+    .bind(market_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::Db)?;
+
+    let yes_holders = positions.iter().filter(|p| p.token == "YES").count();
+    let no_holders = positions.iter().filter(|p| p.token == "NO").count();
+    let yes_shares: i64 = positions.iter().filter(|p| p.token == "YES").map(|p| p.shares).sum();
+    let no_shares: i64 = positions.iter().filter(|p| p.token == "NO").map(|p| p.shares).sum();
+
+    Ok(Json(serde_json::json!({
+        "marketId":    market_id,
+        "positions":   positions,
+        "yesHolders":  yes_holders,
+        "noHolders":   no_holders,
+        "yesShares":   yes_shares,
+        "noShares":    no_shares,
+        "totalHolders": yes_holders + no_holders
+    })))
+}
+
 // ── DB row types ──────────────────────────────────────────────────────────────
 
 #[derive(sqlx::FromRow)]
@@ -320,4 +655,33 @@ struct PriceRow {
     no_price: i32,
     volume_24h: i64,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(sqlx::FromRow)]
+struct TrendingRow {
+    market_id: i32,
+    question: String,
+    category: String,
+    resolution_date: chrono::DateTime<chrono::Utc>,
+    status: String,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    total_volume: i64,
+    trade_count: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct CategoryRow {
+    category: String,
+    market_count: i32,
+    open_count: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct ActivityRow {
+    buyer_address: String,
+    token: String,
+    shares: i64,
+    cost: i64,
+    tx_hash: String,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
 }

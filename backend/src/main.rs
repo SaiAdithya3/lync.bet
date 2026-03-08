@@ -10,7 +10,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use db::DbPool;
-use routes::{actions, markets, orders, portfolio};
+use routes::{actions, leaderboard, markets, orders, portfolio};
 use services::AppState;
 
 #[tokio::main]
@@ -43,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/orders", orders::router())
         .nest("/api/portfolio", portfolio::router())
         .nest("/api/actions", actions::router())
+        .nest("/api/leaderboard", leaderboard::router())
         .layer(cors)
         .with_state(state);
 

@@ -3,6 +3,22 @@ use serde::{Deserialize, Serialize};
 // ── Request bodies ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateMarketRequest {
+    /// Human-readable question, e.g. "Will BTC reach $100k by Dec 2026?"
+    pub question: String,
+    #[serde(default = "default_category")]
+    pub category: String,
+    /// ISO-8601 or unix timestamp for resolution deadline
+    pub resolution_date: String,
+    /// Address of the market creator (for attribution, not auth)
+    pub creator_address: String,
+}
+
+fn default_category() -> String {
+    "general".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderRequest {
     pub market_id: i32,
     /// "YES" or "NO"

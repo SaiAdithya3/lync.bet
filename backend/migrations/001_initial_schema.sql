@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS trades (
     id              SERIAL PRIMARY KEY,
     market_id       INTEGER NOT NULL REFERENCES markets(market_id),
     buyer_address   VARCHAR(42) NOT NULL,
-    token           VARCHAR(3) NOT NULL,
+    token           VARCHAR(10) NOT NULL,
     shares          BIGINT NOT NULL,
     cost            BIGINT NOT NULL,
     tx_hash         VARCHAR(66) NOT NULL,
@@ -92,6 +92,24 @@ CREATE TABLE IF NOT EXISTS action_mapper (
 
 CREATE INDEX IF NOT EXISTS idx_action_mapper_user ON action_mapper(user_address, status);
 CREATE INDEX IF NOT EXISTS idx_action_mapper_type ON action_mapper(action_type, status);
+
+-- User positions: aggregated per (user, market, token).
+-- Updated by the backend on order submit and confirmed by the watcher on OrderFilled.
+-- cost = total USDC spent, shares = total outcome tokens minted.
+CREATE TABLE IF NOT EXISTS user_positions (
+    id              SERIAL PRIMARY KEY,
+    user_address    VARCHAR(42) NOT NULL,
+    market_id       INTEGER NOT NULL REFERENCES markets(market_id),
+    token           VARCHAR(3) NOT NULL,   -- YES / NO
+    shares          BIGINT NOT NULL DEFAULT 0,
+    cost            BIGINT NOT NULL DEFAULT 0,
+    avg_price       INTEGER NOT NULL DEFAULT 50,
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_address, market_id, token)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_positions_user ON user_positions(user_address);
+CREATE INDEX IF NOT EXISTS idx_user_positions_market ON user_positions(market_id);
 
 -- Watcher sync state
 CREATE TABLE IF NOT EXISTS watcher_cursor (

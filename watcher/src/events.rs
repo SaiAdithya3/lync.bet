@@ -54,31 +54,36 @@ pub async fn process_log(pool: &PgPool, log: &Log) -> Result<()> {
 }
 
 async fn process_market_created(pool: &PgPool, log: &Log) -> Result<()> {
-    // topics[1] = marketId (indexed)
     let market_id = log
         .topics
         .get(1)
         .map(|t| U256::from(t.as_bytes()))
         .unwrap_or_default();
 
-    // data = questionHash, creator, yesToken, noToken, resolutionTimestamp (32 bytes each, 5 * 32 = 160)
+    // data layout: questionHash(32) | creator(32) | yesToken(32) | noToken(32) | resolutionTimestamp(32)
     let data = &log.data.0;
     if data.len() < 160 {
         tracing::warn!("MarketCreated: insufficient data len {}", data.len());
         return Ok(());
     }
 
+    let question_hash = &data[0..32];
+    let creator = Address::from_slice(&data[44..64]);
     let yes_token = Address::from_slice(&data[76..96]);
     let no_token = Address::from_slice(&data[108..128]);
+    let resolution_ts = U256::from_big_endian(&data[128..160]);
 
     let tx_hash = format_tx_hash(log.transaction_hash);
     let market_id_num = market_id.as_u64() as i32;
 
-    // Update existing market (created by API) or insert if from external source
+    // Try to update an existing row first (backend pre-inserts on POST /api/markets)
     let result = sqlx::query(
         r#"
         UPDATE markets
-        SET tx_hash = $1, yes_token_address = $2, no_token_address = $3
+        SET tx_hash = $1,
+            yes_token_address = $2,
+            no_token_address = $3,
+            status = 'open'
         WHERE market_id = $4
         "#,
     )
@@ -89,11 +94,33 @@ async fn process_market_created(pool: &PgPool, log: &Log) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // If no row existed (market created externally / script), insert it
     if result.rows_affected() == 0 {
-        tracing::debug!(
-            "MarketCreated: market_id={} not in DB (backend creates first), tx_hash={}",
-            market_id_num,
-            tx_hash
+        let resolution_secs = resolution_ts.as_u64() as i64;
+        sqlx::query(
+            r#"
+            INSERT INTO markets
+                (market_id, question, question_hash, category, creator_address,
+                 yes_token_address, no_token_address, resolution_date, status, tx_hash)
+            VALUES ($1, $2, $3, 'general', $4, $5, $6, to_timestamp($7), 'open', $8)
+            ON CONFLICT (market_id) DO UPDATE
+            SET yes_token_address = $5, no_token_address = $6, tx_hash = $8, status = 'open'
+            "#,
+        )
+        .bind(market_id_num)
+        .bind(format!("Market #{}", market_id_num))
+        .bind(question_hash)
+        .bind(format_address(creator))
+        .bind(format_address(yes_token))
+        .bind(format_address(no_token))
+        .bind(resolution_secs as f64)
+        .bind(&tx_hash)
+        .execute(pool)
+        .await?;
+
+        tracing::info!(
+            "MarketCreated: inserted new market_id={} (created externally)",
+            market_id_num
         );
     }
 
@@ -161,12 +188,69 @@ async fn process_order_filled(pool: &PgPool, log: &Log) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Upsert user position: accumulate shares and cost for this (user, market, token)
+    let shares_i64 = shares.as_u64() as i64;
+    let cost_i64 = cost.as_u64() as i64;
+    let price_for_pos = if shares_i64 > 0 {
+        ((cost_i64 * 100) / shares_i64).clamp(1, 99) as i32
+    } else {
+        50
+    };
+
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO user_positions (user_address, market_id, token, shares, cost, avg_price)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (user_address, market_id, token) DO UPDATE
+        SET shares = user_positions.shares + $4,
+            cost   = user_positions.cost + $5,
+            avg_price = CASE
+                WHEN (user_positions.shares + $4) > 0
+                THEN (((user_positions.cost + $5) * 100) / (user_positions.shares + $4))::int
+                ELSE 50
+            END,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(format_address(buyer))
+    .bind(market_id.as_u64() as i32)
+    .bind(token)
+    .bind(shares_i64)
+    .bind(cost_i64)
+    .bind(price_for_pos)
+    .execute(pool)
+    .await;
+
+    // Record a price snapshot so orderbook pricing reflects this fill
+    if shares_i64 > 0 {
+        let price_cents = ((cost_i64 * 100) / shares_i64).clamp(1, 99) as i32;
+        let (yes_price, no_price) = if token == "YES" {
+            (price_cents, 100 - price_cents)
+        } else {
+            (100 - price_cents, price_cents)
+        };
+
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO price_snapshots (market_id, yes_price, no_price, volume_24h)
+            VALUES ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(market_id.as_u64() as i32)
+        .bind(yes_price)
+        .bind(no_price)
+        .bind(cost_i64)
+        .execute(pool)
+        .await;
+    }
+
     tracing::info!(
-        "OrderFilled: market_id={} buyer={} token={} shares={}",
+        "OrderFilled: market_id={} buyer={} token={} shares={} cost={}",
         market_id,
         format_address(buyer),
         token,
-        shares
+        shares,
+        cost
     );
     Ok(())
 }
@@ -220,7 +304,7 @@ async fn process_market_cancelled(pool: &PgPool, log: &Log) -> Result<()> {
     Ok(())
 }
 
-async fn process_winnings_redeemed(_pool: &PgPool, log: &Log) -> Result<()> {
+async fn process_winnings_redeemed(pool: &PgPool, log: &Log) -> Result<()> {
     let market_id = log
         .topics
         .get(1)
@@ -238,12 +322,29 @@ async fn process_winnings_redeemed(_pool: &PgPool, log: &Log) -> Result<()> {
         0
     };
 
+    let tx_hash = format_tx_hash(log.transaction_hash);
+
+    // Track redemption in the trades table as a "REDEEM" entry
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO trades (market_id, buyer_address, token, shares, cost, tx_hash, block_number)
+        VALUES ($1, $2, 'REDEEM', $3, $3, $4, $5)
+        ON CONFLICT (tx_hash, market_id, buyer_address, token) DO NOTHING
+        "#,
+    )
+    .bind(market_id.as_u64() as i32)
+    .bind(format_address(user))
+    .bind(amount as i64)
+    .bind(&tx_hash)
+    .bind(log.block_number.map(|b| b.as_u64() as i64))
+    .execute(pool)
+    .await;
+
     tracing::info!(
         "WinningsRedeemed: market_id={} user={} amount={}",
         market_id,
         format_address(user),
         amount
     );
-    // Optional: could insert into a redemptions table for analytics
     Ok(())
 }

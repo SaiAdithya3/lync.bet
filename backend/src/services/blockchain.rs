@@ -20,6 +20,13 @@ fn nonces_selector() -> [u8; 4] {
     keccak256("nonces(address)")[..4].try_into().unwrap()
 }
 
+/// ABI-encoded function selector for `createMarket(bytes32,uint256)`.
+fn create_market_selector() -> [u8; 4] {
+    keccak256("createMarket(bytes32,uint256)")[..4]
+        .try_into()
+        .unwrap()
+}
+
 /// ABI-encoded function selector for
 /// `fillOrder((uint256,uint8,address,uint256,uint256,uint256,uint256),bytes)`.
 fn fill_order_selector() -> [u8; 4] {
@@ -209,6 +216,48 @@ impl BlockchainService {
         let signed = wallet.sign_transaction(&tx.clone().into()).await?;
         let raw = tx
             .rlp_signed(&signed);
+        let pending = self.provider.send_raw_transaction(raw).await?;
+        let receipt = pending
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Transaction dropped from mempool"))?;
+
+        Ok(receipt.transaction_hash)
+    }
+
+    /// Call `createMarket(bytes32 questionHash, uint256 resolutionTimestamp)` on-chain.
+    /// Returns the transaction hash on success.
+    pub async fn create_market(
+        &self,
+        question_hash: [u8; 32],
+        resolution_timestamp: u64,
+    ) -> Result<H256> {
+        let wallet = self
+            .wallet
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("BACKEND_PRIVATE_KEY not set"))?;
+
+        let mut calldata = create_market_selector().to_vec();
+        calldata.extend_from_slice(&encode(&[
+            Token::FixedBytes(question_hash.to_vec()),
+            Token::Uint(U256::from(resolution_timestamp)),
+        ]));
+
+        let nonce = self
+            .provider
+            .get_transaction_count(wallet.address(), None)
+            .await?;
+        let gas_price = self.provider.get_gas_price().await?;
+
+        let tx = TransactionRequest::new()
+            .to(self.contract_address)
+            .data(calldata)
+            .nonce(nonce)
+            .gas_price(gas_price)
+            .gas(2_000_000u64) // market creation deploys two ERC-20s
+            .chain_id(self.chain_id);
+
+        let signed = wallet.sign_transaction(&tx.clone().into()).await?;
+        let raw = tx.rlp_signed(&signed);
         let pending = self.provider.send_raw_transaction(raw).await?;
         let receipt = pending
             .await?
