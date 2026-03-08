@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { sepolia } from "wagmi/chains";
+import { baseSepolia } from "wagmi/chains";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { Modal } from "../ui/Modal";
 import { useUIStore } from "../../stores/uiStore";
@@ -33,7 +33,7 @@ export function WalletModal() {
 
   const handleConnect = async (connector: (typeof connectors)[number]) => {
     try {
-      await connectAsync({ connector, chainId: sepolia.id });
+      await connectAsync({ connector, chainId: baseSepolia.id });
       setOpenModal(null);
     } catch {
       // Keep modal open on error so user can retry or see error

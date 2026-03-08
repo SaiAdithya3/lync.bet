@@ -7,6 +7,31 @@ interface ProbabilityChartProps {
   className?: string;
 }
 
+/** lightweight-charts requires strictly ascending time. Sort and dedupe by keeping last value per time. */
+function normalizeChartData(
+  data: { time: string; value: number }[]
+): { time: string; value: number }[] {
+  const valid = data.filter((d) => d.time != null && d.time !== "");
+  if (valid.length === 0) return [];
+  const toSortKey = (t: string) => {
+    const n = Number(t);
+    if (!Number.isNaN(n) && String(n) === t) return n;
+    return new Date(t).getTime();
+  };
+  const sorted = [...valid].sort((a, b) => toSortKey(a.time) - toSortKey(b.time));
+  const deduped: { time: string; value: number }[] = [];
+  for (const d of sorted) {
+    const last = deduped[deduped.length - 1];
+    const sameTime = last && toSortKey(last.time) === toSortKey(d.time);
+    if (sameTime) {
+      last.value = d.value;
+    } else {
+      deduped.push({ time: d.time, value: d.value });
+    }
+  }
+  return deduped;
+}
+
 export function ProbabilityChart({ height = 300, className = "" }: ProbabilityChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -47,7 +72,7 @@ export function ProbabilityChart({ height = 300, className = "" }: ProbabilityCh
       },
     }) as ISeriesApi<"Line">;
 
-    const chartData = data.map((d) => ({
+    const chartData = normalizeChartData(data).map((d) => ({
       time: d.time as string,
       value: d.value * 100,
     }));
@@ -61,11 +86,11 @@ export function ProbabilityChart({ height = 300, className = "" }: ProbabilityCh
       chartRef.current = null;
       seriesRef.current = null;
     };
-  }, [height]);
+  }, [height, data]);
 
   useEffect(() => {
     if (!seriesRef.current || !data.length) return;
-    const chartData = data.map((d) => ({
+    const chartData = normalizeChartData(data).map((d) => ({
       time: d.time as string,
       value: d.value * 100,
     }));

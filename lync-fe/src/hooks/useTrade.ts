@@ -3,6 +3,7 @@ import { useAccount, useSignTypedData } from "wagmi";
 import { orderService } from "../services/orderService";
 import { marketService } from "../services/marketService";
 import { useTradeStore } from "../stores/tradeStore";
+import { ensureCollateralApproval } from "../services/approvalService";
 
 export function useTrade(marketId: string | undefined) {
   const { address } = useAccount();
@@ -31,6 +32,11 @@ export function useTrade(marketId: string | undefined) {
           cost,
           user_address: address,
         });
+
+        await ensureCollateralApproval(
+          address as `0x${string}`,
+          BigInt(quote.order.cost)
+        );
 
         const domain = quote.signing_payload.domain as {
           name: string;
